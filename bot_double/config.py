@@ -21,6 +21,7 @@ class Settings:
     max_messages_per_user: int = 200
     prompt_samples: int = 30
     dialog_context_messages: int = 3
+    min_tokens_to_store: int = 3
 
 
 class SettingsError(RuntimeError):
@@ -68,6 +69,7 @@ def load_settings() -> Settings:
     max_messages = _get_env_int("MAX_MESSAGES_PER_USER", 200, minimum=min_messages)
     prompt_samples = _get_env_int("PROMPT_SAMPLE_SIZE", 30, minimum=1)
     dialog_context_messages = _get_env_int("DIALOG_CONTEXT_MESSAGES", 3, minimum=0)
+    min_tokens_to_store = _get_env_int("MIN_TOKENS_TO_STORE", 3, minimum=1)
 
     return Settings(
         bot_token=bot_token,
@@ -79,4 +81,5 @@ def load_settings() -> Settings:
         max_messages_per_user=max_messages,
         prompt_samples=prompt_samples,
         dialog_context_messages=dialog_context_messages,
+        min_tokens_to_store=min_tokens_to_store,
     )
