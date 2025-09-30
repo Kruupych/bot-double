@@ -14,9 +14,12 @@ def display_name(username: Optional[str], first_name: Optional[str], last_name: 
     return "Неизвестный пользователь"
 
 
-def should_store_message(message: Message, *, min_tokens: int) -> bool:
+def should_store_message(
+    message: Message, *, min_tokens: int, allowed_bot_id: Optional[int] = None
+) -> bool:
     if message.from_user and message.from_user.is_bot:
-        return False
+        if allowed_bot_id is None or message.from_user.id != allowed_bot_id:
+            return False
     if not message.text:
         return False
     if message.text.startswith("/"):

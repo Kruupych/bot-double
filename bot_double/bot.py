@@ -228,7 +228,11 @@ class BotDouble:
 
     # --- internal helpers -----------------------------------------------------------
     async def _capture_message(self, message: Message) -> None:
-        if not should_store_message(message, min_tokens=self._settings.min_tokens_to_store):
+        if not should_store_message(
+            message,
+            min_tokens=self._settings.min_tokens_to_store,
+            allowed_bot_id=self._bot_id,
+        ):
             return
         if message.from_user is None:
             return
