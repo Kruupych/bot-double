@@ -40,3 +40,52 @@ def should_store_message(
     if "http://" in lowered or "https://" in lowered:
         return False
     return True
+
+
+_FEMALE_ENDINGS = ("а", "я", "ия", "ля", "ся", "на", "ра")
+_MALE_EXCEPTIONS = {
+    "никита",
+    "илья",
+    "кузьма",
+    "миша",
+    "жека",
+    "шура",
+    "женя",
+    "саша",
+    "валя",
+}
+_FEMALE_OVERRIDES = {
+    "женя",
+    "саша",
+    "валя",
+    "ксюша",
+    "лера",
+    "аня",
+    "оля",
+    "лена",
+    "инна",
+    "мария",
+    "марина",
+    "елена",
+    "алёна",
+    "настя",
+    "катя",
+    "инга",
+    "диана",
+    "лара",
+}
+
+
+def guess_gender(first_name: Optional[str], username: Optional[str]) -> Optional[str]:
+    if not first_name:
+        return None
+    name = first_name.strip().lower()
+    if not name:
+        return None
+    if name in _FEMALE_OVERRIDES:
+        return "female"
+    if name in _MALE_EXCEPTIONS:
+        return "male"
+    if name.endswith(_FEMALE_ENDINGS):
+        return "female"
+    return None

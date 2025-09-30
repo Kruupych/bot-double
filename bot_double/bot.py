@@ -27,7 +27,7 @@ from .style_engine import (
     StyleEngine,
     StyleSample,
 )
-from .utils import display_name, should_store_message
+from .utils import display_name, guess_gender, should_store_message
 
 LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -128,6 +128,9 @@ class BotDouble:
         requester_profile = await self._collect_requester_profile(
             chat.id, message.from_user, int(user_row["id"])
         )
+        persona_gender = guess_gender(
+            user_row["first_name"], user_row["username"]
+        )
         try:
             ai_reply = await self._generate_reply(
                 username,
@@ -137,6 +140,7 @@ class BotDouble:
                 context_messages,
                 peer_profiles,
                 requester_profile,
+                persona_gender,
             )
         except Exception as exc:  # pragma: no cover - network errors etc.
             LOGGER.exception("Failed to generate imitation", exc_info=exc)
@@ -239,6 +243,9 @@ class BotDouble:
         requester_profile = await self._collect_requester_profile(
             chat.id, message.from_user, int(user_row["id"])
         )
+        persona_gender = guess_gender(
+            user_row["first_name"], user_row["username"]
+        )
         try:
             ai_reply = await self._generate_reply(
                 username,
@@ -248,6 +255,7 @@ class BotDouble:
                 context_messages,
                 peer_profiles,
                 requester_profile,
+                persona_gender,
             )
         except Exception as exc:  # pragma: no cover - network errors etc.
             LOGGER.exception("Auto imitation failed", exc_info=exc)
@@ -330,6 +338,7 @@ class BotDouble:
         context_messages: Optional[List[ContextMessage]],
         peer_profiles: Optional[List[ParticipantProfile]],
         requester_profile: Optional[RequesterProfile],
+        persona_gender: Optional[str],
     ) -> str:
         loop = asyncio.get_running_loop()
         style_samples = [StyleSample(text=sample) for sample in samples]
@@ -343,6 +352,7 @@ class BotDouble:
             context_messages,
             peer_profiles,
             requester_profile,
+            persona_gender,
         )
 
     async def _collect_style_samples(self, chat_id: int, user_id: int) -> List[str]:

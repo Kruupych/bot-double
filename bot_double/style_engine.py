@@ -47,11 +47,13 @@ class StyleEngine:
         model: str = "gpt-5-nano",
         reasoning_effort: Optional[str] = None,
         text_verbosity: Optional[str] = None,
+        persona_gender_hint: Optional[str] = None,
     ) -> None:
         self._client = OpenAI(api_key=api_key)
         self._model = model
         self._reasoning_effort = reasoning_effort
         self._text_verbosity = text_verbosity
+        self._persona_gender_hint = persona_gender_hint
 
     def generate_reply(
         self,
@@ -62,6 +64,7 @@ class StyleEngine:
         context: Optional[List[ContextMessage]] = None,
         peers: Optional[List[ParticipantProfile]] = None,
         requester: Optional[RequesterProfile] = None,
+        persona_gender: Optional[str] = None,
     ) -> str:
         sample_block = "\n".join(f"- {sample.text}" for sample in samples)
         if not sample_block:
@@ -112,6 +115,7 @@ class StyleEngine:
             f"{context_section}"
             f"{peer_section}"
             f"{requester_section}"
+            f"{self._gender_instruction(persona_gender)}"
             f"Текст для ответа: {starter}\n\n"
             "Сформируй один ответ, как будто пишет сам пользователь."
             " Держи его тон, длину и структуру фраз."
@@ -150,3 +154,17 @@ class StyleEngine:
             **kwargs,
         )
         return response.output_text.strip()
+
+    def _gender_instruction(self, persona_gender: Optional[str]) -> str:
+        gender = persona_gender or self._persona_gender_hint
+        if gender == "female":
+            return (
+                "Пользователь говорит от женского лица. Используй женские формы"
+                " глаголов и местоимений, если это уместно." "\n\n"
+            )
+        if gender == "male":
+            return (
+                "Пользователь говорит от мужского лица. Используй мужские формы"
+                " глаголов и местоимений, если это уместно." "\n\n"
+            )
+        return ""
