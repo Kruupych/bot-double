@@ -32,6 +32,8 @@ class BotDouble:
         self._settings = settings
         self._db = Database(settings.db_path, settings.max_messages_per_user)
         self._style = StyleEngine(settings.openai_api_key, model=settings.openai_model)
+        self._bot_id: Optional[int] = None
+        self._bot_name: str = "Бот-Двойник"
 
     def build_application(self) -> Application:
         return (
@@ -44,7 +46,10 @@ class BotDouble:
         )
 
     async def _post_init(self, application: Application) -> None:
-        LOGGER.info("Bot initialized")
+        me = await application.bot.get_me()
+        self._bot_id = me.id
+        self._bot_name = me.first_name or self._bot_name
+        LOGGER.info("Bot initialized as %s (%s)", me.first_name, me.username)
 
     async def _post_shutdown(self, application: Application) -> None:
         LOGGER.info("Bot shutting down")
@@ -218,6 +223,19 @@ class BotDouble:
 
         await message.reply_text(f"{persona_name} (AI): {ai_reply}")
 
+    async def on_new_members(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        chat = update.effective_chat
+        if not message or not chat or not message.new_chat_members:
+            return
+        if self._bot_id is None:
+            self._bot_id = context.bot.id
+
+        for member in message.new_chat_members:
+            if member.id == self._bot_id:
+                await chat.send_message(self._build_intro_message())
+                break
+
     # --- internal helpers -----------------------------------------------------------
     async def _capture_message(self, message: Message) -> None:
         if not should_store_message(message):
@@ -321,6 +339,18 @@ class BotDouble:
             messages.append(ContextMessage(speaker=persona_name, text=text))
         return messages or None
 
+    def _build_intro_message(self) -> str:
+        return (
+            f"Привет! Я {self._bot_name}, бот-двоиник. Я изучаю стиль общения участников"
+            " и могу отвечать за них.\n\n"
+            "Что я умею:\n"
+            "• /imitate @username [текст] — ответить в стиле участника.\n"
+            "• /imitate_profiles — показать готовые профили.\n"
+            "• /auto_imitate_on или /auto_imitate_off — включить или выключить автоимитацию.\n"
+            "• /forgetme — удалить мои данные о вас.\n"
+            "Просто общайтесь, а я буду учиться на фоне!"
+        )
+
 
 def run_bot(settings: Settings) -> None:
     bot = BotDouble(settings)
@@ -331,6 +361,7 @@ def run_bot(settings: Settings) -> None:
     application.add_handler(CommandHandler("auto_imitate_on", bot.auto_imitate_on))
     application.add_handler(CommandHandler("auto_imitate_off", bot.auto_imitate_off))
     application.add_handler(CommandHandler("forgetme", bot.forget_me))
+    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, bot.on_new_members))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.on_text_message))
 
     application.run_polling(close_loop=False)
