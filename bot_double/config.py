@@ -1,0 +1,82 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+@dataclass(slots=True)
+class Settings:
+    bot_token: str
+    openai_api_key: str
+    db_path: Path
+    openai_model: str = "gpt-5-nano"
+    auto_imitate_probability: float = 0.2
+    min_messages_for_profile: int = 20
+    max_messages_per_user: int = 200
+    prompt_samples: int = 30
+    dialog_context_messages: int = 3
+
+
+class SettingsError(RuntimeError):
+    pass
+
+
+def _get_env_float(name: str, default: Optional[float]) -> Optional[float]:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:  # pragma: no cover - defensive
+        raise SettingsError(f"Environment variable {name} must be a float") from exc
+
+
+def _get_env_int(name: str, default: int, *, minimum: Optional[int] = None) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        value = default
+    else:
+        try:
+            value = int(raw)
+        except ValueError as exc:  # pragma: no cover - defensive
+            raise SettingsError(f"Environment variable {name} must be an integer") from exc
+    if minimum is not None and value < minimum:
+        raise SettingsError(f"Environment variable {name} must be >= {minimum}")
+    return value
+
+
+def load_settings() -> Settings:
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not bot_token:
+        raise SettingsError("TELEGRAM_BOT_TOKEN is not set")
+
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    if not openai_api_key:
+        raise SettingsError("OPENAI_API_KEY is not set")
+
+    db_path = Path(os.getenv("BOT_DOUBLE_DB_PATH", "bot_double.db"))
+    openai_model = os.getenv("OPENAI_MODEL", "gpt-5-nano")
+
+    probability = _get_env_float("AUTO_IMITATE_PROBABILITY", 0.2) or 0.0
+    min_messages = _get_env_int("MIN_MESSAGES_FOR_PROFILE", 20, minimum=1)
+    max_messages = _get_env_int("MAX_MESSAGES_PER_USER", 200, minimum=min_messages)
+    prompt_samples = _get_env_int("PROMPT_SAMPLE_SIZE", 30, minimum=1)
+    dialog_context_messages = _get_env_int("DIALOG_CONTEXT_MESSAGES", 3, minimum=0)
+
+    return Settings(
+        bot_token=bot_token,
+        openai_api_key=openai_api_key,
+        db_path=db_path,
+        openai_model=openai_model,
+        auto_imitate_probability=probability,
+        min_messages_for_profile=min_messages,
+        max_messages_per_user=max_messages,
+        prompt_samples=prompt_samples,
+        dialog_context_messages=dialog_context_messages,
+    )
