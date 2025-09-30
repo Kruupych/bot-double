@@ -60,6 +60,7 @@ class RelationshipStats:
     formal: int
     teasing: int
     samples: List[str]
+    summary: Optional[str] = None
 
 
 def evaluate_interaction(text: str) -> InteractionSignals:
@@ -76,6 +77,9 @@ def evaluate_interaction(text: str) -> InteractionSignals:
 def build_relationship_hint(
     addressee_name: str, stats: RelationshipStats, min_samples: int = 3
 ) -> Optional[str]:
+    if stats.summary:
+        return stats.summary.strip()
+
     if stats.total < min_samples:
         return None
 

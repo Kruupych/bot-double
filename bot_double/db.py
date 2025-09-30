@@ -42,10 +42,28 @@ CREATE TABLE IF NOT EXISTS pair_interactions (
     formal_count INTEGER NOT NULL DEFAULT 0,
     teasing_count INTEGER NOT NULL DEFAULT 0,
     sample_messages TEXT,
+    pending_messages INTEGER NOT NULL DEFAULT 0,
+    last_analyzed_at INTEGER,
+    analysis_summary TEXT,
+    analysis_details TEXT,
     PRIMARY KEY (chat_id, speaker_id, target_id),
     FOREIGN KEY(speaker_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY(target_id) REFERENCES users(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS pair_interaction_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    speaker_id INTEGER NOT NULL,
+    target_id INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    timestamp INTEGER NOT NULL,
+    FOREIGN KEY(speaker_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY(target_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_pair_messages_lookup
+    ON pair_interaction_messages(chat_id, speaker_id, target_id, timestamp DESC);
 """
 
 
@@ -214,11 +232,13 @@ class Database:
         formal: bool,
         teasing: bool,
         sample_text: Optional[str],
+        full_text: Optional[str],
+        timestamp: int,
     ) -> None:
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 """
-                SELECT total_count, informal_count, formal_count, teasing_count, sample_messages
+                SELECT total_count, informal_count, formal_count, teasing_count, sample_messages, pending_messages
                 FROM pair_interactions
                 WHERE chat_id = ? AND speaker_id = ? AND target_id = ?
                 """,
@@ -230,6 +250,11 @@ class Database:
             formal_count = int(row["formal_count"]) if row else 0
             teasing_count = int(row["teasing_count"]) if row else 0
             samples = self._decode_samples(row["sample_messages"]) if row else []
+            pending_messages = (
+                int(row["pending_messages"])
+                if row and row["pending_messages"] is not None
+                else 0
+            )
 
             total_count += 1
             if informal:
@@ -238,6 +263,7 @@ class Database:
                 formal_count += 1
             if teasing:
                 teasing_count += 1
+            pending_messages += 1
 
             normalized_sample = self._normalize_sample(sample_text)
             if normalized_sample:
@@ -245,6 +271,32 @@ class Database:
                     samples.remove(normalized_sample)
                 samples.append(normalized_sample)
                 samples = samples[-5:]
+
+            if full_text:
+                self._conn.execute(
+                    """
+                    INSERT INTO pair_interaction_messages (
+                        chat_id,
+                        speaker_id,
+                        target_id,
+                        text,
+                        timestamp
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (chat_id, speaker_id, target_id, full_text, timestamp),
+                )
+                self._conn.execute(
+                    """
+                    DELETE FROM pair_interaction_messages
+                    WHERE id IN (
+                        SELECT id FROM pair_interaction_messages
+                        WHERE chat_id = ? AND speaker_id = ? AND target_id = ?
+                        ORDER BY timestamp DESC, id DESC
+                        LIMIT -1 OFFSET 100
+                    )
+                    """,
+                    (chat_id, speaker_id, target_id),
+                )
 
             if row is None:
                 self._conn.execute(
@@ -257,8 +309,12 @@ class Database:
                         informal_count,
                         formal_count,
                         teasing_count,
-                        sample_messages
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        sample_messages,
+                        pending_messages,
+                        last_analyzed_at,
+                        analysis_summary,
+                        analysis_details
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         chat_id,
@@ -269,6 +325,10 @@ class Database:
                         formal_count,
                         teasing_count,
                         self._encode_samples(samples),
+                        pending_messages,
+                        None,
+                        None,
+                        None,
                     ),
                 )
             else:
@@ -279,7 +339,8 @@ class Database:
                         informal_count = ?,
                         formal_count = ?,
                         teasing_count = ?,
-                        sample_messages = ?
+                        sample_messages = ?,
+                        pending_messages = ?
                     WHERE chat_id = ? AND speaker_id = ? AND target_id = ?
                     """,
                     (
@@ -288,6 +349,7 @@ class Database:
                         formal_count,
                         teasing_count,
                         self._encode_samples(samples),
+                        pending_messages,
                         chat_id,
                         speaker_id,
                         target_id,
@@ -299,7 +361,15 @@ class Database:
     ) -> Optional[dict[str, object]]:
         cursor = self._conn.execute(
             """
-            SELECT total_count, informal_count, formal_count, teasing_count, sample_messages
+            SELECT total_count,
+                   informal_count,
+                   formal_count,
+                   teasing_count,
+                   sample_messages,
+                   pending_messages,
+                   last_analyzed_at,
+                   analysis_summary,
+                   analysis_details
             FROM pair_interactions
             WHERE chat_id = ? AND speaker_id = ? AND target_id = ?
             """,
@@ -314,7 +384,82 @@ class Database:
             "formal_count": int(row["formal_count"]),
             "teasing_count": int(row["teasing_count"]),
             "samples": self._decode_samples(row["sample_messages"]),
+            "pending_messages": int(row["pending_messages"])
+            if row["pending_messages"] is not None
+            else 0,
+            "last_analyzed_at": int(row["last_analyzed_at"]) if row["last_analyzed_at"] is not None else None,
+            "analysis_summary": row["analysis_summary"],
+            "analysis_details": row["analysis_details"],
         }
+
+    def get_pair_messages(
+        self, chat_id: int, speaker_id: int, target_id: int, limit: int
+    ) -> List[sqlite3.Row]:
+        cursor = self._conn.execute(
+            """
+            SELECT text, timestamp
+            FROM pair_interaction_messages
+            WHERE chat_id = ? AND speaker_id = ? AND target_id = ?
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?
+            """,
+            (chat_id, speaker_id, target_id, limit),
+        )
+        return cursor.fetchall()
+
+    def get_chat_messages_before(
+        self, chat_id: int, before_timestamp: int, limit: int
+    ) -> List[sqlite3.Row]:
+        cursor = self._conn.execute(
+            """
+            SELECT u.username, u.first_name, u.last_name, m.text, m.timestamp
+            FROM messages m
+            JOIN users u ON u.id = m.user_id
+            WHERE m.chat_id = ? AND m.timestamp < ?
+            ORDER BY m.timestamp DESC, m.id DESC
+            LIMIT ?
+            """,
+            (chat_id, before_timestamp, limit),
+        )
+        rows = cursor.fetchall()
+        rows.reverse()
+        return rows
+
+    def save_pair_analysis(
+        self,
+        chat_id: int,
+        speaker_id: int,
+        target_id: int,
+        summary: str,
+        details: str,
+        analyzed_at: int,
+    ) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE pair_interactions
+                SET analysis_summary = ?,
+                    analysis_details = ?,
+                    last_analyzed_at = ?,
+                    pending_messages = 0
+                WHERE chat_id = ? AND speaker_id = ? AND target_id = ?
+                """,
+                (
+                    summary,
+                    details,
+                    analyzed_at,
+                    chat_id,
+                    speaker_id,
+                    target_id,
+                ),
+            )
+
+    def get_user_by_id(self, user_id: int) -> Optional[sqlite3.Row]:
+        cursor = self._conn.execute(
+            "SELECT id, username, first_name, last_name FROM users WHERE id = ?",
+            (user_id,),
+        )
+        return cursor.fetchone()
 
     # --- chat settings ----------------------------------------------------------------
     def set_auto_imitate(self, chat_id: int, enabled: bool) -> None:
@@ -395,11 +540,47 @@ class Database:
                     formal_count INTEGER NOT NULL DEFAULT 0,
                     teasing_count INTEGER NOT NULL DEFAULT 0,
                     sample_messages TEXT,
+                    pending_messages INTEGER NOT NULL DEFAULT 0,
+                    last_analyzed_at INTEGER,
+                    analysis_summary TEXT,
+                    analysis_details TEXT,
                     PRIMARY KEY (chat_id, speaker_id, target_id),
                     FOREIGN KEY(speaker_id) REFERENCES users(id) ON DELETE CASCADE,
                     FOREIGN KEY(target_id) REFERENCES users(id) ON DELETE CASCADE
                 )
                 """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pair_interaction_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    speaker_id INTEGER NOT NULL,
+                    target_id INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    timestamp INTEGER NOT NULL,
+                    FOREIGN KEY(speaker_id) REFERENCES users(id) ON DELETE CASCADE,
+                    FOREIGN KEY(target_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_pair_messages_lookup
+                ON pair_interaction_messages(chat_id, speaker_id, target_id, timestamp DESC)
+                """
+            )
+            self._maybe_add_column(
+                "pair_interactions", "pending_messages", "INTEGER NOT NULL DEFAULT 0"
+            )
+            self._maybe_add_column(
+                "pair_interactions", "last_analyzed_at", "INTEGER"
+            )
+            self._maybe_add_column(
+                "pair_interactions", "analysis_summary", "TEXT"
+            )
+            self._maybe_add_column(
+                "pair_interactions", "analysis_details", "TEXT"
             )
 
     def _maybe_add_column(self, table: str, column: str, definition: str) -> None:

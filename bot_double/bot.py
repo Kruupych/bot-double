@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import re
+import time
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TypeVar
@@ -35,6 +37,7 @@ from .relationship_analysis import (
     build_relationship_hint,
     evaluate_interaction,
 )
+from .social_analysis import InteractionExcerpt, SocialAnalyzer
 from .style_analysis import build_style_summary
 from .utils import (
     display_name,
@@ -68,11 +71,20 @@ class BotDouble:
             reasoning_effort=settings.openai_reasoning_effort,
             text_verbosity=settings.openai_text_verbosity,
         )
+        analysis_model = settings.relationship_analysis_model or settings.openai_model
+        self._social = SocialAnalyzer(
+            settings.openai_api_key,
+            analysis_model,
+            reasoning_effort=settings.openai_reasoning_effort,
+        )
         self._bot_id: Optional[int] = None
         self._bot_name: str = "Бот-Двойник"
         self._bot_user_id: Optional[int] = None
         self._message_buffers: Dict[Tuple[int, int], "_PendingBuffer"] = {}
         self._buffer_lock = asyncio.Lock()
+        self._analysis_queue: Optional[asyncio.Queue[Tuple[int, int, int]]] = None
+        self._analysis_inflight: Set[Tuple[int, int, int]] = set()
+        self._analysis_worker: Optional[asyncio.Task] = None
 
     def build_application(self) -> Application:
         return (
@@ -99,10 +111,17 @@ class BotDouble:
         except Exception:
             LOGGER.exception("Failed to ensure bot profile in database")
         LOGGER.info("Bot initialized as %s (%s)", me.first_name, me.username)
+        if self._analysis_queue is None:
+            self._analysis_queue = asyncio.Queue()
+        if self._analysis_worker is None:
+            self._analysis_worker = asyncio.create_task(
+                self._relationship_analysis_worker()
+            )
 
     async def _post_shutdown(self, application: Application) -> None:
         LOGGER.info("Bot shutting down")
         await self._flush_all_buffers()
+        await self._stop_analysis_worker()
         self._db.close()
 
     # --- handlers ------------------------------------------------------------------
@@ -565,6 +584,7 @@ class BotDouble:
 
         signals = evaluate_interaction(stripped)
         sample_text = stripped if signals.has_any() else None
+        timestamp = int(message.date.timestamp())
 
         for target_id in targets:
             if target_id == speaker_internal_id:
@@ -578,7 +598,10 @@ class BotDouble:
                 formal=signals.formal,
                 teasing=signals.teasing,
                 sample_text=sample_text,
+                full_text=stripped,
+                timestamp=timestamp,
             )
+            await self._maybe_queue_analysis(chat_id, speaker_internal_id, target_id)
 
     def _extract_mentions(self, message: Message) -> List[str]:
         entities = message.parse_entities([MessageEntity.MENTION])
@@ -638,8 +661,39 @@ class BotDouble:
             formal=int(stats["formal_count"]),
             teasing=int(stats["teasing_count"]),
             samples=list(stats.get("samples", [])),
+            summary=stats.get("analysis_summary"),
         )
         return build_relationship_hint(addressee_name, relationship_stats)
+
+    async def _maybe_queue_analysis(
+        self, chat_id: int, speaker_id: int, target_id: int
+    ) -> None:
+        if self._analysis_queue is None:
+            return
+        key = (chat_id, speaker_id, target_id)
+        if key in self._analysis_inflight:
+            return
+        stats = await self._run_db(
+            self._db.get_pair_stats,
+            chat_id,
+            speaker_id,
+            target_id,
+        )
+        if not stats:
+            return
+        pending = int(stats.get("pending_messages", 0))
+        if pending < self._settings.relationship_analysis_min_pending:
+            return
+        last_analyzed = stats.get("last_analyzed_at")
+        threshold_seconds = self._settings.relationship_analysis_min_hours * 3600
+        if (
+            threshold_seconds > 0
+            and last_analyzed is not None
+            and int(time.time()) - int(last_analyzed) < threshold_seconds
+        ):
+            return
+        await self._analysis_queue.put(key)
+        self._analysis_inflight.add(key)
 
     async def _buffer_short_message(
         self,
@@ -788,6 +842,154 @@ class BotDouble:
             participant_b,
             topic,
         )
+
+    async def _relationship_analysis_worker(self) -> None:
+        assert self._analysis_queue is not None
+        try:
+            while True:
+                key = await self._analysis_queue.get()
+                try:
+                    await self._perform_relationship_analysis(*key)
+                except Exception:
+                    LOGGER.exception("Relationship analysis task failed")
+                finally:
+                    self._analysis_inflight.discard(key)
+                    self._analysis_queue.task_done()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self._analysis_queue is not None:
+                while not self._analysis_queue.empty():
+                    try:
+                        self._analysis_queue.get_nowait()
+                        self._analysis_queue.task_done()
+                    except asyncio.QueueEmpty:
+                        break
+
+    async def _perform_relationship_analysis(
+        self, chat_id: int, speaker_id: int, target_id: int
+    ) -> None:
+        stats = await self._run_db(
+            self._db.get_pair_stats,
+            chat_id,
+            speaker_id,
+            target_id,
+        )
+        if not stats:
+            return
+        pending = int(stats.get("pending_messages", 0))
+        if pending < self._settings.relationship_analysis_min_pending:
+            return
+
+        speaker_row = await self._run_db(self._db.get_user_by_id, speaker_id)
+        target_row = await self._run_db(self._db.get_user_by_id, target_id)
+        if speaker_row is None or target_row is None:
+            return
+
+        speaker_name = display_name(
+            speaker_row["username"],
+            speaker_row["first_name"],
+            speaker_row["last_name"],
+        )
+        target_name = display_name(
+            target_row["username"],
+            target_row["first_name"],
+            target_row["last_name"],
+        )
+
+        max_samples = 20
+        rows = await self._run_db(
+            self._db.get_pair_messages,
+            chat_id,
+            speaker_id,
+            target_id,
+            max_samples,
+        )
+        if not rows:
+            return
+
+        min_required = max(
+            self._settings.relationship_analysis_min_pending, 5
+        )
+        if len(rows) < min_required:
+            return
+
+        excerpts: List[InteractionExcerpt] = []
+        for record in reversed(rows):
+            focus_text = (record["text"] or "").strip()
+            if not focus_text:
+                continue
+            focus_timestamp = int(record["timestamp"])
+            context_rows = await self._run_db(
+                self._db.get_chat_messages_before,
+                chat_id,
+                focus_timestamp,
+                3,
+            )
+            context_lines: List[str] = []
+            for ctx in context_rows[-3:]:
+                ctx_text = (ctx["text"] or "").strip()
+                if not ctx_text:
+                    continue
+                ctx_name = display_name(
+                    ctx["username"], ctx["first_name"], ctx["last_name"]
+                )
+                context_lines.append(f"{ctx_name}: {ctx_text}")
+            excerpts.append(
+                InteractionExcerpt(
+                    focus_text=focus_text,
+                    focus_timestamp=focus_timestamp,
+                    context=tuple(context_lines),
+                )
+            )
+
+        if len(excerpts) < min_required:
+            return
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: self._social.analyze_relationship(
+                speaker_name, target_name, tuple(excerpts)
+            ),
+        )
+        if not result:
+            return
+
+        summary = str(result.get("summary", "")).strip()
+        if not summary:
+            tone = str(result.get("tone", "unknown")).strip()
+            notes = str(result.get("emotional_notes", "unknown")).strip()
+            summary = f"Тон общения: {tone}. Эмоциональные заметки: {notes}."
+        details_json = json.dumps(result, ensure_ascii=False)
+        analyzed_at = int(time.time())
+        await self._run_db(
+            self._db.save_pair_analysis,
+            chat_id,
+            speaker_id,
+            target_id,
+            summary,
+            details_json,
+            analyzed_at,
+        )
+
+    async def _stop_analysis_worker(self) -> None:
+        if self._analysis_worker is not None:
+            self._analysis_worker.cancel()
+            try:
+                await self._analysis_worker
+            except asyncio.CancelledError:
+                pass
+            self._analysis_worker = None
+        if self._analysis_queue is not None:
+            while not self._analysis_queue.empty():
+                try:
+                    self._analysis_queue.get_nowait()
+                    self._analysis_queue.task_done()
+                except asyncio.QueueEmpty:
+                    break
+            self._analysis_queue = None
+        self._analysis_inflight.clear()
 
     async def _collect_style_samples(
         self, chat_id: int, user_id: int, *, topic_hint: Optional[str] = None
