@@ -492,6 +492,118 @@ class BotDouble:
 
         await message.reply_text(dialogue_text)
 
+    async def profile_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        chat = update.effective_chat
+        if not message or not chat or message.from_user is None:
+            return
+
+        requester = message.from_user
+        requester_internal_id = await self._ensure_internal_user(requester)
+        if requester_internal_id is None:
+            await message.reply_text("Не удалось определить ваш профиль.")
+            return
+
+        args = context.args
+        target_internal_id = requester_internal_id
+        target_row = await self._run_db(self._db.get_user_by_id, requester_internal_id)
+        relationship_target_internal_id: Optional[int] = None
+
+        if args:
+            first = args[0]
+            if not first.startswith("@"):
+                await message.reply_text("Использование: /profile [@user] [@other]")
+                return
+            username = first.lstrip("@")
+            user_row = await self._run_db(self._db.get_user_by_username, username)
+            if user_row is None:
+                await message.reply_text(f"Я ещё не знаю пользователя @{username}.")
+                return
+            target_internal_id = int(user_row["id"])
+            target_row = await self._run_db(self._db.get_user_by_id, target_internal_id)
+            if target_row is None:
+                await message.reply_text("Нет данных о выбранном пользователе.")
+                return
+            if len(args) >= 2:
+                second = args[1]
+                if not second.startswith("@"):
+                    await message.reply_text("Второй аргумент должен быть в формате @username")
+                    return
+                second_username = second.lstrip("@")
+                second_row = await self._run_db(
+                    self._db.get_user_by_username, second_username
+                )
+                if second_row is None:
+                    await message.reply_text(
+                        f"Я ещё не знаю пользователя @{second_username}."
+                    )
+                    return
+                relationship_target_internal_id = int(second_row["id"])
+
+        target_name = display_name(
+            target_row["username"], target_row["first_name"], target_row["last_name"]
+        )
+
+        persona_card = await self._get_persona_card(chat.id, target_internal_id)
+        response_lines: List[str] = [f"Профиль {target_name}:"]
+        if persona_card:
+            response_lines.append(persona_card)
+        else:
+            response_lines.append("Карточка персоны ещё не готова. Продолжайте общаться!")
+
+        relationship_lines: List[str] = []
+        if relationship_target_internal_id is not None:
+            summary = await self._get_relationship_summary_text(
+                chat.id, target_internal_id, relationship_target_internal_id
+            )
+            other_row = await self._run_db(
+                self._db.get_user_by_id, relationship_target_internal_id
+            )
+            other_name = display_name(
+                other_row["username"], other_row["first_name"], other_row["last_name"]
+            ) if other_row else "неизвестный пользователь"
+            if summary:
+                relationship_lines.append(
+                    f"Отношение к {other_name}: {summary}"
+                )
+            else:
+                relationship_lines.append(
+                    f"Отношение к {other_name}: данных пока мало."
+                )
+            reverse = await self._get_relationship_summary_text(
+                chat.id, relationship_target_internal_id, target_internal_id
+            )
+            if reverse:
+                relationship_lines.append(
+                    f"Ответная позиция {other_name}: {reverse}"
+                )
+        elif target_internal_id != requester_internal_id:
+            summary = await self._get_relationship_summary_text(
+                chat.id, requester_internal_id, target_internal_id
+            )
+            if summary:
+                response_lines.append("")
+                response_lines.append(
+                    f"Вы о {target_name}: {summary}"
+                )
+            reverse = await self._get_relationship_summary_text(
+                chat.id, target_internal_id, requester_internal_id
+            )
+            if reverse:
+                response_lines.append(
+                    f"{target_name} о вас: {reverse}"
+                )
+        elif relationship_target_internal_id is None:
+            # requester looking at self; optionally show relationships for provided second mention later
+            pass
+
+        if relationship_lines:
+            response_lines.append("")
+            response_lines.extend(relationship_lines)
+
+        text = "\n".join(line for line in response_lines if line is not None)
+        await message.reply_text(text or "Нет данных", disable_web_page_preview=True)
+
     # --- internal helpers -----------------------------------------------------------
     async def _capture_message(self, message: Message) -> None:
         if message.from_user is None:
@@ -740,6 +852,35 @@ class BotDouble:
                     lines.append(f"Советы по стилю: {tips}")
         persona_card = "\n".join(lines).strip()
         return persona_card or None
+
+    async def _get_relationship_summary_text(
+        self, chat_id: int, speaker_id: int, target_id: int
+    ) -> Optional[str]:
+        stats = await self._run_db(
+            self._db.get_pair_stats,
+            chat_id,
+            speaker_id,
+            target_id,
+        )
+        if not stats:
+            return None
+        summary = stats.get("analysis_summary")
+        if summary and str(summary).strip():
+            return str(summary).strip()
+        target_row = await self._run_db(self._db.get_user_by_id, target_id)
+        if target_row is None:
+            return None
+        target_name = display_name(
+            target_row["username"], target_row["first_name"], target_row["last_name"]
+        )
+        relationship_stats = RelationshipStats(
+            total=int(stats.get("total_count", 0)),
+            informal=int(stats.get("informal_count", 0)),
+            formal=int(stats.get("formal_count", 0)),
+            teasing=int(stats.get("teasing_count", 0)),
+            samples=list(stats.get("samples", [])),
+        )
+        return build_relationship_hint(target_name, relationship_stats)
 
     async def _note_persona_message(
         self, chat_id: Optional[int], user_id: int, timestamp: int
@@ -1432,6 +1573,8 @@ def run_bot(settings: Settings) -> None:
     application.add_handler(CommandHandler("auto_imitate_on", bot.auto_imitate_on))
     application.add_handler(CommandHandler("auto_imitate_off", bot.auto_imitate_off))
     application.add_handler(CommandHandler("dialogue", bot.dialogue))
+    application.add_handler(CommandHandler("profile", bot.profile_command))
+    application.add_handler(CommandHandler("me", bot.profile_command))
     application.add_handler(CommandHandler("forgetme", bot.forget_me))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, bot.on_new_members))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.on_text_message))
