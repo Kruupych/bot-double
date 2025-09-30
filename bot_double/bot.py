@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 from functools import partial
 from typing import Any, Callable, List, Optional, Set, TypeVar
 
@@ -27,6 +28,7 @@ from .style_engine import (
     StyleEngine,
     StyleSample,
 )
+from .style_analysis import build_style_summary
 from .utils import (
     display_name,
     guess_gender,
@@ -118,12 +120,16 @@ class BotDouble:
             )
             return
 
-        samples = await self._collect_style_samples(chat.id, int(user_row["id"]))
+        samples = await self._collect_style_samples(
+            chat.id, int(user_row["id"]), topic_hint=starter
+        )
         if not samples:
             await message.reply_text(
                 f"Пока не могу имитировать @{username}, сообщений недостаточно."
             )
             return
+
+        style_summary = build_style_summary(samples)
 
         persona_name = display_name(
             user_row["username"], user_row["first_name"], user_row["last_name"]
@@ -146,6 +152,7 @@ class BotDouble:
                 peer_profiles,
                 requester_profile,
                 persona_gender,
+                style_summary,
             )
         except Exception as exc:  # pragma: no cover - network errors etc.
             LOGGER.exception("Failed to generate imitation", exc_info=exc)
@@ -236,9 +243,15 @@ class BotDouble:
 
         # Use message text without mentions as starter
         starter = self._strip_mentions(message.text or "", mention_usernames)
-        samples = await self._collect_style_samples(chat.id, int(user_row["id"]))
+        samples = await self._collect_style_samples(
+            chat.id,
+            int(user_row["id"]),
+            topic_hint=starter,
+        )
         if not samples:
             return
+
+        style_summary = build_style_summary(samples)
 
         persona_name = display_name(
             user_row["username"], user_row["first_name"], user_row["last_name"]
@@ -261,6 +274,7 @@ class BotDouble:
                 peer_profiles,
                 requester_profile,
                 persona_gender,
+                style_summary,
             )
         except Exception as exc:  # pragma: no cover - network errors etc.
             LOGGER.exception("Auto imitation failed", exc_info=exc)
@@ -383,6 +397,7 @@ class BotDouble:
         peer_profiles: Optional[List[ParticipantProfile]],
         requester_profile: Optional[RequesterProfile],
         persona_gender: Optional[str],
+        style_summary: Optional[str],
     ) -> str:
         loop = asyncio.get_running_loop()
         style_samples = [StyleSample(text=sample) for sample in samples]
@@ -397,9 +412,12 @@ class BotDouble:
             peer_profiles,
             requester_profile,
             persona_gender,
+            style_summary,
         )
 
-    async def _collect_style_samples(self, chat_id: int, user_id: int) -> List[str]:
+    async def _collect_style_samples(
+        self, chat_id: int, user_id: int, *, topic_hint: Optional[str] = None
+    ) -> List[str]:
         total_target = self._settings.prompt_samples
         if total_target <= 0:
             return []
@@ -425,21 +443,58 @@ class BotDouble:
                 random_fetch,
             )
 
-        combined: List[str] = []
+        tokens = self._prepare_topic_tokens(topic_hint)
+        candidates: List[tuple[str, bool, int]] = []
         seen: Set[str] = set()
 
-        for text in recent_messages + random_pool:
+        order = 0
+        for text in recent_messages:
             normalized = text.strip()
-            if not normalized:
+            if not normalized or normalized in seen:
                 continue
-            if normalized in seen:
-                continue
-            combined.append(normalized)
+            candidates.append((normalized, True, order))
             seen.add(normalized)
-            if len(combined) >= total_target:
-                break
+            order += 1
 
-        return combined
+        for text in random_pool:
+            normalized = text.strip()
+            if not normalized or normalized in seen:
+                continue
+            candidates.append((normalized, False, order))
+            seen.add(normalized)
+            order += 1
+
+        if not candidates:
+            return []
+
+        if tokens:
+            scored = []
+            for text, is_recent, idx in candidates:
+                score = self._topical_score(text, tokens)
+                recency_bonus = 1 if is_recent else 0
+                scored.append((text, score, recency_bonus, idx))
+            scored.sort(key=lambda item: (-item[1], -item[2], item[3]))
+            selected = [item[0] for item in scored[:total_target]]
+            return selected
+
+        return [text for text, _, _ in candidates[:total_target]]
+
+    def _prepare_topic_tokens(self, topic_hint: Optional[str]) -> Set[str]:
+        if not topic_hint:
+            return set()
+        tokens = {token for token in re.findall(r"[\w']+", topic_hint.lower()) if len(token) > 2}
+        return tokens
+
+    def _topical_score(self, text: str, topic_tokens: Set[str]) -> float:
+        if not topic_tokens:
+            return 0.0
+        words = {token for token in re.findall(r"[\w']+", text.lower()) if token}
+        if not words:
+            return 0.0
+        overlap = topic_tokens & words
+        if not overlap:
+            return 0.0
+        return len(overlap) / len(topic_tokens)
 
     async def _collect_peer_profiles(
         self, chat_id: int, target_user_id: int

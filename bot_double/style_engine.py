@@ -65,10 +65,15 @@ class StyleEngine:
         peers: Optional[List[ParticipantProfile]] = None,
         requester: Optional[RequesterProfile] = None,
         persona_gender: Optional[str] = None,
+        style_summary: Optional[str] = None,
     ) -> str:
         sample_block = "\n".join(f"- {sample.text}" for sample in samples)
         if not sample_block:
             raise ValueError("No samples supplied for style generation")
+
+        summary_section = ""
+        if style_summary:
+            summary_section = f"Характеристика стиля:\n{style_summary}\n\n"
 
         context_section = ""
         if context:
@@ -112,6 +117,7 @@ class StyleEngine:
             f"Собери ответ в стиле пользователя {display_name}"
             f" (username: @{username}).\n\n"
             f"Примеры сообщений (без имен):\n{sample_block}\n\n"
+            f"{summary_section}"
             f"{context_section}"
             f"{peer_section}"
             f"{requester_section}"
