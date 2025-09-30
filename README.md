@@ -11,25 +11,35 @@ Telegram-бот, который автоматически собирает со
 ## Быстрый старт
 1. Создайте файл `.env` или задайте переменные окружения:
    ```env
-   TELEGRAM_BOT_TOKEN=...  # токен бота от BotFather
-   OPENAI_API_KEY=...      # ключ OpenAI
+   TELEGRAM_BOT_TOKEN=...  # токен бота от BotFather (обязательно)
+   OPENAI_API_KEY=...      # ключ OpenAI (обязательно)
    ```
-   Дополнительно можно настроить:
-   ```env
-   BOT_DOUBLE_DB_PATH=bot_double.db
-   AUTO_IMITATE_PROBABILITY=0.25
-   MIN_MESSAGES_FOR_PROFILE=20
-   MAX_MESSAGES_PER_USER=200
-   PROMPT_SAMPLE_SIZE=30
-   DIALOG_CONTEXT_MESSAGES=6
-   STYLE_RECENT_MESSAGES=5
-   PEER_PROFILE_COUNT=3
-   PEER_PROFILE_SAMPLES=2
-   OPENAI_MODEL=gpt-5-nano
-   OPENAI_REASONING_EFFORT=medium
-   OPENAI_TEXT_VERBOSITY=medium
-   MIN_TOKENS_TO_STORE=3
-   ```
+
+   Дополнительные параметры (все имеют значения по умолчанию и задаются при необходимости):
+
+   | Переменная | Назначение | Значение по умолчанию |
+   | --- | --- | --- |
+   | `BOT_DOUBLE_DB_PATH` | путь к SQLite-базе | `bot_double.db` |
+   | `AUTO_IMITATE_PROBABILITY` | шанс автоимитации при упоминании | `0.2` |
+   | `MIN_MESSAGES_FOR_PROFILE` | минимум сообщений для построения профиля | `20` |
+   | `MAX_MESSAGES_PER_USER` | сколько сообщений хранить на пользователя | `200` |
+   | `PROMPT_SAMPLE_SIZE` | размер выборки стиля для промпта | `30` |
+   | `DIALOG_CONTEXT_MESSAGES` | сколько последних сообщений подмешивать как контекст | `6` |
+   | `STYLE_RECENT_MESSAGES` | сколько свежих сообщений отдавать модели первым | `5` |
+   | `PEER_PROFILE_COUNT` | сколько «соседей» собирать для бэкграунда | `3` |
+   | `PEER_PROFILE_SAMPLES` | сколько сообщений брать у каждого соседа | `2` |
+   | `OPENAI_MODEL` | модель для имитаций | `gpt-5-nano` |
+   | `OPENAI_REASONING_EFFORT` | усилие рассуждений (`minimal/low/medium/high`) | пусто (выкл) |
+   | `OPENAI_TEXT_VERBOSITY` | многословность (`low/medium/high`) | пусто (дефолт модели) |
+   | `MIN_TOKENS_TO_STORE` | минимальное число слов для мгновенного сохранения | `3` |
+   | `SHORT_MESSAGE_BUFFER_SECONDS` | таймаут агрегации коротких сообщений | `10` |
+   | `RELATIONSHIP_ANALYSIS_MODEL` | модель для соцаналитика (если пусто — `OPENAI_MODEL`) | пусто |
+   | `RELATIONSHIP_ANALYSIS_MIN_PENDING` | сколько обращений накопить перед анализом пары | `5` |
+   | `RELATIONSHIP_ANALYSIS_MIN_HOURS` | пауза между анализами одной пары (часы) | `24` |
+   | `PERSONA_ANALYSIS_MODEL` | модель для карточек персоны (если пусто — `OPENAI_MODEL`) | пусто |
+   | `PERSONA_ANALYSIS_MIN_MESSAGES` | сколько новых реплик накопить перед обновлением карточки | `50` |
+   | `PERSONA_ANALYSIS_MAX_MESSAGES` | сколько сообщений подавать модели (верхний предел) | `100` |
+   | `PERSONA_ANALYSIS_MIN_HOURS` | минимальный интервал между карточками (часы) | `24` |
 
 2. Установите зависимости:
    ```bash
