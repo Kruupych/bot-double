@@ -78,18 +78,24 @@ class StyleEngine:
                 peer_section = "Другие участники и их манера:\n" + "\n".join(peer_lines) + "\n\n"
 
         requester_section = ""
-        if requester and requester.samples:
-            joined = " / ".join(requester.samples)
-            requester_section = (
-                f"Вопрос задаёт {requester.name}. Он обычно пишет так: {joined}.\n\n"
-            )
+        if requester:
+            sample_hint = ""
+            if requester.samples:
+                joined = " / ".join(requester.samples)
+                sample_hint = f" Он обычно пишет так: {joined}."
+            requester_section = f"Вопрос задаёт {requester.name}.{sample_hint}\n"
             if requester.is_same_person:
                 requester_section += (
-                    "Это тот же человек, чей стиль нужно имитировать."
-                    " Ответ должен звучать как его собственная мысль"
-                    " или откровенный ответ самому себе, без обращения"
-                    " ко второму лицу.\n\n"
+                    "Он спрашивает сам у себя. Ответ сформулируй как внутренний"
+                    " монолог или честное признание, без обращения к себе как"
+                    " к другому человеку."
                 )
+            else:
+                requester_section += (
+                    "Можешь обращаться к нему по имени или на 'ты', если это"
+                    " соответствует стилю примеров."
+                )
+            requester_section += "\n\n"
 
         prompt = (
             f"Собери ответ в стиле пользователя {display_name}"

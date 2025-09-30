@@ -436,10 +436,10 @@ class BotDouble:
             sample_limit,
         )
         formatted = [text.strip() for text in samples if text.strip()]
-        if not formatted:
-            return None
         name = display_name(user.username, user.first_name, user.last_name)
         is_same_person = requester_internal_id == target_internal_id
+        if not formatted and not is_same_person:
+            return None
         return RequesterProfile(
             name=name,
             samples=formatted[:sample_limit],
