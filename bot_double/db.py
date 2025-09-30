@@ -207,6 +207,30 @@ class Database:
         rows.reverse()
         return rows
 
+    def get_top_participants(
+        self, chat_id: int, exclude_user_id: Optional[int], limit: int
+    ) -> List[sqlite3.Row]:
+        if limit <= 0:
+            return []
+        params: List[object] = [chat_id]
+        exclusion_clause = ""
+        if exclude_user_id is not None:
+            exclusion_clause = "AND u.id != ?"
+            params.append(exclude_user_id)
+        cursor = self._conn.execute(
+            f"""
+            SELECT u.id, u.username, u.first_name, u.last_name, COUNT(m.id) as message_count
+            FROM users u
+            JOIN messages m ON m.user_id = u.id
+            WHERE m.chat_id = ? {exclusion_clause}
+            GROUP BY u.id
+            ORDER BY message_count DESC
+            LIMIT ?
+            """,
+            (*params, limit),
+        )
+        return cursor.fetchall()
+
     def delete_user_data(self, telegram_id: int) -> bool:
         with self._lock, self._conn:
             cursor = self._conn.execute(

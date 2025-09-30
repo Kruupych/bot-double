@@ -23,6 +23,8 @@ class Settings:
     dialog_context_messages: int = 6
     style_recent_messages: int = 5
     min_tokens_to_store: int = 3
+    peer_profile_count: int = 3
+    peer_profile_samples: int = 2
 
 
 class SettingsError(RuntimeError):
@@ -71,6 +73,8 @@ def load_settings() -> Settings:
     prompt_samples = _get_env_int("PROMPT_SAMPLE_SIZE", 30, minimum=1)
     dialog_context_messages = _get_env_int("DIALOG_CONTEXT_MESSAGES", 6, minimum=0)
     style_recent_messages = _get_env_int("STYLE_RECENT_MESSAGES", 5, minimum=0)
+    peer_profile_count = _get_env_int("PEER_PROFILE_COUNT", 3, minimum=0)
+    peer_profile_samples = _get_env_int("PEER_PROFILE_SAMPLES", 2, minimum=0)
     min_tokens_to_store = _get_env_int("MIN_TOKENS_TO_STORE", 3, minimum=1)
 
     return Settings(
@@ -85,4 +89,6 @@ def load_settings() -> Settings:
         dialog_context_messages=dialog_context_messages,
         style_recent_messages=style_recent_messages,
         min_tokens_to_store=min_tokens_to_store,
+        peer_profile_count=peer_profile_count,
+        peer_profile_samples=peer_profile_samples,
     )

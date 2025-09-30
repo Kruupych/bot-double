@@ -20,7 +20,7 @@ from telegram.ext import (
 
 from .config import Settings
 from .db import Database
-from .style_engine import ContextMessage, StyleEngine, StyleSample
+from .style_engine import ContextMessage, ParticipantProfile, StyleEngine, StyleSample
 from .utils import display_name, should_store_message
 
 LOGGER = logging.getLogger(__name__)
@@ -34,6 +34,7 @@ class BotDouble:
         self._style = StyleEngine(settings.openai_api_key, model=settings.openai_model)
         self._bot_id: Optional[int] = None
         self._bot_name: str = "Бот-Двойник"
+        self._bot_user_id: Optional[int] = None
 
     def build_application(self) -> Application:
         return (
@@ -49,6 +50,16 @@ class BotDouble:
         me = await application.bot.get_me()
         self._bot_id = me.id
         self._bot_name = me.first_name or self._bot_name
+        try:
+            self._bot_user_id = await self._run_db(
+                self._db.upsert_user,
+                me.id,
+                me.username,
+                me.first_name,
+                me.last_name,
+            )
+        except Exception:
+            LOGGER.exception("Failed to ensure bot profile in database")
         LOGGER.info("Bot initialized as %s (%s)", me.first_name, me.username)
 
     async def _post_shutdown(self, application: Application) -> None:
@@ -102,9 +113,15 @@ class BotDouble:
             user_row["username"], user_row["first_name"], user_row["last_name"]
         )
         context_messages = await self._get_dialog_context(chat.id)
+        peer_profiles = await self._collect_peer_profiles(chat.id, int(user_row["id"]))
         try:
             ai_reply = await self._generate_reply(
-                username, persona_name, samples, starter, context_messages
+                username,
+                persona_name,
+                samples,
+                starter,
+                context_messages,
+                peer_profiles,
             )
         except Exception as exc:  # pragma: no cover - network errors etc.
             LOGGER.exception("Failed to generate imitation", exc_info=exc)
@@ -203,9 +220,15 @@ class BotDouble:
             user_row["username"], user_row["first_name"], user_row["last_name"]
         )
         context_messages = await self._get_dialog_context(chat.id)
+        peer_profiles = await self._collect_peer_profiles(chat.id, int(user_row["id"]))
         try:
             ai_reply = await self._generate_reply(
-                username, persona_name, samples, starter, context_messages
+                username,
+                persona_name,
+                samples,
+                starter,
+                context_messages,
+                peer_profiles,
             )
         except Exception as exc:  # pragma: no cover - network errors etc.
             LOGGER.exception("Auto imitation failed", exc_info=exc)
@@ -244,6 +267,8 @@ class BotDouble:
             user.first_name,
             user.last_name,
         )
+        if user.is_bot and user.id == self._bot_id:
+            self._bot_user_id = user_id
         timestamp = int(message.date.timestamp())
         await self._run_db(
             self._db.store_message,
@@ -284,6 +309,7 @@ class BotDouble:
         samples: List[str],
         starter: str,
         context_messages: Optional[List[ContextMessage]],
+        peer_profiles: Optional[List[ParticipantProfile]],
     ) -> str:
         loop = asyncio.get_running_loop()
         style_samples = [StyleSample(text=sample) for sample in samples]
@@ -295,6 +321,7 @@ class BotDouble:
             style_samples,
             starter,
             context_messages,
+            peer_profiles,
         )
 
     async def _collect_style_samples(self, chat_id: int, user_id: int) -> List[str]:
@@ -338,6 +365,40 @@ class BotDouble:
                 break
 
         return combined
+
+    async def _collect_peer_profiles(
+        self, chat_id: int, target_user_id: int
+    ) -> Optional[List[ParticipantProfile]]:
+        if self._settings.peer_profile_count <= 0 or self._settings.peer_profile_samples <= 0:
+            return None
+
+        peers = await self._run_db(
+            self._db.get_top_participants,
+            chat_id,
+            target_user_id,
+            self._settings.peer_profile_count,
+        )
+        if not peers:
+            return None
+
+        profiles: List[ParticipantProfile] = []
+        for row in peers:
+            if self._bot_user_id is not None and int(row["id"]) == self._bot_user_id:
+                continue
+            peer_samples = await self._run_db(
+                self._db.get_random_messages,
+                chat_id,
+                int(row["id"]),
+                self._settings.peer_profile_samples,
+            )
+            if not peer_samples:
+                continue
+            name = display_name(row["username"], row["first_name"], row["last_name"])
+            formatted = [sample.strip() for sample in peer_samples if sample.strip()]
+            if not formatted:
+                continue
+            profiles.append(ParticipantProfile(name=name, samples=formatted))
+        return profiles or None
 
     async def _run_db(self, func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         loop = asyncio.get_running_loop()

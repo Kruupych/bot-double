@@ -23,6 +23,8 @@ Telegram-бот, который автоматически собирает со
    PROMPT_SAMPLE_SIZE=30
    DIALOG_CONTEXT_MESSAGES=6
    STYLE_RECENT_MESSAGES=5
+   PEER_PROFILE_COUNT=3
+   PEER_PROFILE_SAMPLES=2
    OPENAI_MODEL=gpt-5-nano
    MIN_TOKENS_TO_STORE=3
    ```
