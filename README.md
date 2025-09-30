@@ -21,8 +21,10 @@ Telegram-бот, который автоматически собирает со
    MIN_MESSAGES_FOR_PROFILE=20
    MAX_MESSAGES_PER_USER=200
    PROMPT_SAMPLE_SIZE=30
-   DIALOG_CONTEXT_MESSAGES=3
+   DIALOG_CONTEXT_MESSAGES=6
+   STYLE_RECENT_MESSAGES=5
    OPENAI_MODEL=gpt-5-nano
+   MIN_TOKENS_TO_STORE=3
    ```
 
 2. Установите зависимости:

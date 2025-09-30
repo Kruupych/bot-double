@@ -153,6 +153,24 @@ class Database:
         )
         return cursor.fetchall()
 
+    def get_recent_messages_for_user(
+        self, chat_id: int, user_id: int, limit: int
+    ) -> List[str]:
+        if limit <= 0:
+            return []
+        cursor = self._conn.execute(
+            """
+            SELECT text FROM messages
+            WHERE chat_id = ? AND user_id = ?
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?
+            """,
+            (chat_id, user_id, limit),
+        )
+        rows = cursor.fetchall()
+        rows.reverse()
+        return [row["text"] for row in rows]
+
     # --- chat settings ----------------------------------------------------------------
     def set_auto_imitate(self, chat_id: int, enabled: bool) -> None:
         value = 1 if enabled else 0

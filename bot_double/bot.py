@@ -4,7 +4,7 @@ import asyncio
 import logging
 import random
 from functools import partial
-from typing import Any, Callable, List, Optional, TypeVar
+from typing import Any, Callable, List, Optional, Set, TypeVar
 
 from telegram import Message, MessageEntity, Update
 from telegram.constants import ParseMode
@@ -91,12 +91,7 @@ class BotDouble:
             )
             return
 
-        samples = await self._run_db(
-            self._db.get_random_messages,
-            chat.id,
-            int(user_row["id"]),
-            self._settings.prompt_samples,
-        )
+        samples = await self._collect_style_samples(chat.id, int(user_row["id"]))
         if not samples:
             await message.reply_text(
                 f"Пока не могу имитировать @{username}, сообщений недостаточно."
@@ -200,12 +195,7 @@ class BotDouble:
 
         # Use message text without mentions as starter
         starter = self._strip_mentions(message.text or "", mention_usernames)
-        samples = await self._run_db(
-            self._db.get_random_messages,
-            chat.id,
-            int(user_row["id"]),
-            self._settings.prompt_samples,
-        )
+        samples = await self._collect_style_samples(chat.id, int(user_row["id"]))
         if not samples:
             return
 
@@ -302,6 +292,48 @@ class BotDouble:
             starter,
             context_messages,
         )
+
+    async def _collect_style_samples(self, chat_id: int, user_id: int) -> List[str]:
+        total_target = self._settings.prompt_samples
+        if total_target <= 0:
+            return []
+
+        recent_limit = min(self._settings.style_recent_messages, total_target)
+        recent_messages = []
+        if recent_limit > 0:
+            recent_messages = await self._run_db(
+                self._db.get_recent_messages_for_user,
+                chat_id,
+                user_id,
+                recent_limit,
+            )
+
+        random_needed = max(total_target - len(recent_messages), 0)
+        random_pool: List[str] = []
+        if random_needed > 0:
+            random_fetch = max(random_needed * 2, total_target)
+            random_pool = await self._run_db(
+                self._db.get_random_messages,
+                chat_id,
+                user_id,
+                random_fetch,
+            )
+
+        combined: List[str] = []
+        seen: Set[str] = set()
+
+        for text in recent_messages + random_pool:
+            normalized = text.strip()
+            if not normalized:
+                continue
+            if normalized in seen:
+                continue
+            combined.append(normalized)
+            seen.add(normalized)
+            if len(combined) >= total_target:
+                break
+
+        return combined
 
     async def _run_db(self, func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         loop = asyncio.get_running_loop()

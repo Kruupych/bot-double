@@ -20,7 +20,8 @@ class Settings:
     min_messages_for_profile: int = 20
     max_messages_per_user: int = 200
     prompt_samples: int = 30
-    dialog_context_messages: int = 3
+    dialog_context_messages: int = 6
+    style_recent_messages: int = 5
     min_tokens_to_store: int = 3
 
 
@@ -68,7 +69,8 @@ def load_settings() -> Settings:
     min_messages = _get_env_int("MIN_MESSAGES_FOR_PROFILE", 20, minimum=1)
     max_messages = _get_env_int("MAX_MESSAGES_PER_USER", 200, minimum=min_messages)
     prompt_samples = _get_env_int("PROMPT_SAMPLE_SIZE", 30, minimum=1)
-    dialog_context_messages = _get_env_int("DIALOG_CONTEXT_MESSAGES", 3, minimum=0)
+    dialog_context_messages = _get_env_int("DIALOG_CONTEXT_MESSAGES", 6, minimum=0)
+    style_recent_messages = _get_env_int("STYLE_RECENT_MESSAGES", 5, minimum=0)
     min_tokens_to_store = _get_env_int("MIN_TOKENS_TO_STORE", 3, minimum=1)
 
     return Settings(
@@ -81,5 +83,6 @@ def load_settings() -> Settings:
         max_messages_per_user=max_messages,
         prompt_samples=prompt_samples,
         dialog_context_messages=dialog_context_messages,
+        style_recent_messages=style_recent_messages,
         min_tokens_to_store=min_tokens_to_store,
     )
