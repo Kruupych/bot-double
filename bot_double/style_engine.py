@@ -37,7 +37,7 @@ class StyleEngine:
         starter: str,
         context: Optional[List[ContextMessage]] = None,
     ) -> str:
-        sample_block = "\n".join(f"{display_name}: {sample.text}" for sample in samples)
+        sample_block = "\n".join(f"- {sample.text}" for sample in samples)
         if not sample_block:
             raise ValueError("No samples supplied for style generation")
 
@@ -51,9 +51,12 @@ class StyleEngine:
         prompt = (
             f"Собери ответ в стиле пользователя {display_name}"
             f" (username: @{username}).\n\n"
-            f"Примеры сообщений:\n{sample_block}\n\n"
+            f"Примеры сообщений (без имен):\n{sample_block}\n\n"
             f"{context_section}"
-            f"Текст для ответа: {starter}\n\nОтвет:"
+            f"Текст для ответа: {starter}\n\n"
+            "Сформируй один ответ, как будто пишет сам пользователь."
+            " Не добавляй перед ответом его имя или какие-либо префиксы."
+            " Ответ:"
         )
 
         response = self._client.responses.create(
