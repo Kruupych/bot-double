@@ -4,6 +4,7 @@ import sqlite3
 import threading
 from pathlib import Path
 from typing import List, Optional
+import json
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -30,6 +31,20 @@ CREATE INDEX IF NOT EXISTS idx_messages_user_chat_timestamp
 CREATE TABLE IF NOT EXISTS chat_settings (
     chat_id INTEGER PRIMARY KEY,
     auto_imitate_enabled INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS pair_interactions (
+    chat_id INTEGER NOT NULL,
+    speaker_id INTEGER NOT NULL,
+    target_id INTEGER NOT NULL,
+    total_count INTEGER NOT NULL DEFAULT 0,
+    informal_count INTEGER NOT NULL DEFAULT 0,
+    formal_count INTEGER NOT NULL DEFAULT 0,
+    teasing_count INTEGER NOT NULL DEFAULT 0,
+    sample_messages TEXT,
+    PRIMARY KEY (chat_id, speaker_id, target_id),
+    FOREIGN KEY(speaker_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY(target_id) REFERENCES users(id) ON DELETE CASCADE
 );
 """
 
@@ -189,6 +204,118 @@ class Database:
         rows.reverse()
         return [row["text"] for row in rows]
 
+    def update_pair_stats(
+        self,
+        chat_id: int,
+        speaker_id: int,
+        target_id: int,
+        *,
+        informal: bool,
+        formal: bool,
+        teasing: bool,
+        sample_text: Optional[str],
+    ) -> None:
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                """
+                SELECT total_count, informal_count, formal_count, teasing_count, sample_messages
+                FROM pair_interactions
+                WHERE chat_id = ? AND speaker_id = ? AND target_id = ?
+                """,
+                (chat_id, speaker_id, target_id),
+            )
+            row = cursor.fetchone()
+            total_count = int(row["total_count"]) if row else 0
+            informal_count = int(row["informal_count"]) if row else 0
+            formal_count = int(row["formal_count"]) if row else 0
+            teasing_count = int(row["teasing_count"]) if row else 0
+            samples = self._decode_samples(row["sample_messages"]) if row else []
+
+            total_count += 1
+            if informal:
+                informal_count += 1
+            if formal:
+                formal_count += 1
+            if teasing:
+                teasing_count += 1
+
+            normalized_sample = self._normalize_sample(sample_text)
+            if normalized_sample:
+                if normalized_sample in samples:
+                    samples.remove(normalized_sample)
+                samples.append(normalized_sample)
+                samples = samples[-5:]
+
+            if row is None:
+                self._conn.execute(
+                    """
+                    INSERT INTO pair_interactions (
+                        chat_id,
+                        speaker_id,
+                        target_id,
+                        total_count,
+                        informal_count,
+                        formal_count,
+                        teasing_count,
+                        sample_messages
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        chat_id,
+                        speaker_id,
+                        target_id,
+                        total_count,
+                        informal_count,
+                        formal_count,
+                        teasing_count,
+                        self._encode_samples(samples),
+                    ),
+                )
+            else:
+                self._conn.execute(
+                    """
+                    UPDATE pair_interactions
+                    SET total_count = ?,
+                        informal_count = ?,
+                        formal_count = ?,
+                        teasing_count = ?,
+                        sample_messages = ?
+                    WHERE chat_id = ? AND speaker_id = ? AND target_id = ?
+                    """,
+                    (
+                        total_count,
+                        informal_count,
+                        formal_count,
+                        teasing_count,
+                        self._encode_samples(samples),
+                        chat_id,
+                        speaker_id,
+                        target_id,
+                    ),
+                )
+
+    def get_pair_stats(
+        self, chat_id: int, speaker_id: int, target_id: int
+    ) -> Optional[dict[str, object]]:
+        cursor = self._conn.execute(
+            """
+            SELECT total_count, informal_count, formal_count, teasing_count, sample_messages
+            FROM pair_interactions
+            WHERE chat_id = ? AND speaker_id = ? AND target_id = ?
+            """,
+            (chat_id, speaker_id, target_id),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "total_count": int(row["total_count"]),
+            "informal_count": int(row["informal_count"]),
+            "formal_count": int(row["formal_count"]),
+            "teasing_count": int(row["teasing_count"]),
+            "samples": self._decode_samples(row["sample_messages"]),
+        }
+
     # --- chat settings ----------------------------------------------------------------
     def set_auto_imitate(self, chat_id: int, enabled: bool) -> None:
         value = 1 if enabled else 0
@@ -257,6 +384,23 @@ class Database:
                 "context_only",
                 "INTEGER NOT NULL DEFAULT 0",
             )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pair_interactions (
+                    chat_id INTEGER NOT NULL,
+                    speaker_id INTEGER NOT NULL,
+                    target_id INTEGER NOT NULL,
+                    total_count INTEGER NOT NULL DEFAULT 0,
+                    informal_count INTEGER NOT NULL DEFAULT 0,
+                    formal_count INTEGER NOT NULL DEFAULT 0,
+                    teasing_count INTEGER NOT NULL DEFAULT 0,
+                    sample_messages TEXT,
+                    PRIMARY KEY (chat_id, speaker_id, target_id),
+                    FOREIGN KEY(speaker_id) REFERENCES users(id) ON DELETE CASCADE,
+                    FOREIGN KEY(target_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+                """
+            )
 
     def _maybe_add_column(self, table: str, column: str, definition: str) -> None:
         cursor = self._conn.execute(f"PRAGMA table_info({table})")
@@ -264,6 +408,36 @@ class Database:
         if column in existing:
             return
         self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def _decode_samples(self, blob: Optional[str]) -> List[str]:
+        if not blob:
+            return []
+        try:
+            items = json.loads(blob)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(items, list):
+            return []
+        result: List[str] = []
+        for item in items:
+            if isinstance(item, str) and item.strip():
+                normalized = item.strip()
+                if normalized not in result:
+                    result.append(normalized)
+        return result
+
+    def _encode_samples(self, samples: List[str]) -> str:
+        return json.dumps(samples, ensure_ascii=False)
+
+    def _normalize_sample(self, text: Optional[str]) -> Optional[str]:
+        if not text:
+            return None
+        trimmed = text.strip()
+        if not trimmed:
+            return None
+        if len(trimmed) > 280:
+            trimmed = trimmed[:277].rstrip() + "..."
+        return trimmed
 
     def delete_user_data(self, telegram_id: int) -> bool:
         with self._lock, self._conn:

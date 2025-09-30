@@ -23,10 +23,16 @@ from .config import Settings
 from .db import Database
 from .style_engine import (
     ContextMessage,
+    DialogueParticipant,
     ParticipantProfile,
     RequesterProfile,
     StyleEngine,
     StyleSample,
+)
+from .relationship_analysis import (
+    RelationshipStats,
+    build_relationship_hint,
+    evaluate_interaction,
 )
 from .style_analysis import build_style_summary
 from .utils import (
@@ -142,6 +148,18 @@ class BotDouble:
         persona_gender = guess_gender(
             user_row["first_name"], user_row["username"]
         )
+        addressee_internal_id = await self._ensure_internal_user(message.from_user)
+        addressee_name = display_name(
+            message.from_user.username,
+            message.from_user.first_name,
+            message.from_user.last_name,
+        )
+        relationship_hint = await self._relationship_hint_for_addressee(
+            chat.id,
+            int(user_row["id"]),
+            addressee_internal_id,
+            addressee_name,
+        )
         try:
             ai_reply = await self._generate_reply(
                 username,
@@ -153,6 +171,7 @@ class BotDouble:
                 requester_profile,
                 persona_gender,
                 style_summary,
+                relationship_hint,
             )
         except Exception as exc:  # pragma: no cover - network errors etc.
             LOGGER.exception("Failed to generate imitation", exc_info=exc)
@@ -264,6 +283,18 @@ class BotDouble:
         persona_gender = guess_gender(
             user_row["first_name"], user_row["username"]
         )
+        addressee_internal_id = await self._ensure_internal_user(message.from_user)
+        addressee_name = display_name(
+            message.from_user.username,
+            message.from_user.first_name,
+            message.from_user.last_name,
+        )
+        relationship_hint = await self._relationship_hint_for_addressee(
+            chat.id,
+            int(user_row["id"]),
+            addressee_internal_id,
+            addressee_name,
+        )
         try:
             ai_reply = await self._generate_reply(
                 username,
@@ -275,6 +306,7 @@ class BotDouble:
                 requester_profile,
                 persona_gender,
                 style_summary,
+                relationship_hint,
             )
         except Exception as exc:  # pragma: no cover - network errors etc.
             LOGGER.exception("Auto imitation failed", exc_info=exc)
@@ -294,6 +326,110 @@ class BotDouble:
             if member.id == self._bot_id:
                 await chat.send_message(self._build_intro_message())
                 break
+
+    async def dialogue(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        chat = update.effective_chat
+        if not message or not chat:
+            return
+        if len(context.args) < 2:
+            await message.reply_text(
+                "Использование: /dialogue @user1 @user2 [тема диалога]"
+            )
+            return
+
+        username_a_arg, username_b_arg = context.args[0], context.args[1]
+        if not username_a_arg.startswith("@") or not username_b_arg.startswith("@"):
+            await message.reply_text("Первых два аргумента должны быть @username участников")
+            return
+
+        username_a = username_a_arg.lstrip("@")
+        username_b = username_b_arg.lstrip("@")
+        topic = " ".join(context.args[2:]).strip()
+
+        row_a = await self._run_db(self._db.get_user_by_username, username_a)
+        row_b = await self._run_db(self._db.get_user_by_username, username_b)
+        if row_a is None:
+            await message.reply_text(f"Я ещё не знаю пользователя @{username_a}.")
+            return
+        if row_b is None:
+            await message.reply_text(f"Я ещё не знаю пользователя @{username_b}.")
+            return
+
+        internal_a = int(row_a["id"])
+        internal_b = int(row_b["id"])
+
+        count_a = await self._run_db(self._db.get_message_count, chat.id, internal_a)
+        count_b = await self._run_db(self._db.get_message_count, chat.id, internal_b)
+        threshold = self._settings.min_messages_for_profile
+        if count_a < threshold:
+            await message.reply_text(
+                f"Пока не могу построить диалог: @{username_a} имеет только {count_a}/{threshold} сообщений."
+            )
+            return
+        if count_b < threshold:
+            await message.reply_text(
+                f"Пока не могу построить диалог: @{username_b} имеет только {count_b}/{threshold} сообщений."
+            )
+            return
+
+        samples_a = await self._collect_style_samples(
+            chat.id,
+            internal_a,
+            topic_hint=topic,
+        )
+        samples_b = await self._collect_style_samples(
+            chat.id,
+            internal_b,
+            topic_hint=topic,
+        )
+        if not samples_a or not samples_b:
+            await message.reply_text("Недостаточно примеров стиля для построения диалога.")
+            return
+
+        persona_name_a = display_name(
+            row_a["username"], row_a["first_name"], row_a["last_name"]
+        )
+        persona_name_b = display_name(
+            row_b["username"], row_b["first_name"], row_b["last_name"]
+        )
+
+        style_summary_a = build_style_summary(samples_a)
+        style_summary_b = build_style_summary(samples_b)
+
+        relationship_hint_a = await self._relationship_hint_for_addressee(
+            chat.id,
+            internal_a,
+            internal_b,
+            persona_name_b,
+        )
+        relationship_hint_b = await self._relationship_hint_for_addressee(
+            chat.id,
+            internal_b,
+            internal_a,
+            persona_name_a,
+        )
+
+        try:
+            dialogue_text = await self._generate_dialogue(
+                username_a,
+                persona_name_a,
+                samples_a,
+                style_summary_a,
+                relationship_hint_a,
+                username_b,
+                persona_name_b,
+                samples_b,
+                style_summary_b,
+                relationship_hint_b,
+                topic or ""
+            )
+        except Exception as exc:  # pragma: no cover - network errors etc.
+            LOGGER.exception("Failed to generate dialogue", exc_info=exc)
+            await message.reply_text("Не удалось построить диалог, попробуйте позже")
+            return
+
+        await message.reply_text(dialogue_text)
 
     # --- internal helpers -----------------------------------------------------------
     async def _capture_message(self, message: Message) -> None:
@@ -347,6 +483,8 @@ class BotDouble:
                 context_only=True,
             )
 
+        await self._update_pair_interactions(message, user_id, text)
+
     def _extract_command_context(self, text: str) -> Optional[str]:
         stripped = text.strip()
         if not stripped.startswith("/"):
@@ -362,6 +500,57 @@ class BotDouble:
             return None
         remainder = parts[1].strip()
         return remainder or None
+
+    async def _update_pair_interactions(
+        self, message: Message, speaker_internal_id: int, text: str
+    ) -> None:
+        chat_id = message.chat_id
+        if chat_id is None:
+            return
+        stripped = text.strip()
+        if not stripped or stripped.startswith("/") or len(stripped) < 3:
+            return
+
+        targets: Set[int] = set()
+
+        mention_usernames = self._extract_mentions(message)
+        for username in mention_usernames:
+            row = await self._run_db(self._db.get_user_by_username, username)
+            if row is None:
+                continue
+            targets.add(int(row["id"]))
+
+        reply = message.reply_to_message
+        if reply and reply.from_user:
+            reply_user = reply.from_user
+            target_id = await self._run_db(
+                self._db.upsert_user,
+                reply_user.id,
+                reply_user.username,
+                reply_user.first_name,
+                reply_user.last_name,
+            )
+            targets.add(target_id)
+
+        if not targets:
+            return
+
+        signals = evaluate_interaction(stripped)
+        sample_text = stripped if signals.has_any() else None
+
+        for target_id in targets:
+            if target_id == speaker_internal_id:
+                continue
+            await self._run_db(
+                self._db.update_pair_stats,
+                chat_id,
+                speaker_internal_id,
+                target_id,
+                informal=signals.informal,
+                formal=signals.formal,
+                teasing=signals.teasing,
+                sample_text=sample_text,
+            )
 
     def _extract_mentions(self, message: Message) -> List[str]:
         entities = message.parse_entities([MessageEntity.MENTION])
@@ -387,6 +576,43 @@ class BotDouble:
             cleaned = cleaned.replace(f"@{username}", "").strip()
         return cleaned or "Продолжи диалог."
 
+    async def _ensure_internal_user(self, user: Optional[User]) -> Optional[int]:
+        if user is None:
+            return None
+        return await self._run_db(
+            self._db.upsert_user,
+            user.id,
+            user.username,
+            user.first_name,
+            user.last_name,
+        )
+
+    async def _relationship_hint_for_addressee(
+        self,
+        chat_id: int,
+        speaker_internal_id: int,
+        target_internal_id: Optional[int],
+        addressee_name: str,
+    ) -> Optional[str]:
+        if target_internal_id is None:
+            return None
+        stats = await self._run_db(
+            self._db.get_pair_stats,
+            chat_id,
+            speaker_internal_id,
+            target_internal_id,
+        )
+        if not stats:
+            return None
+        relationship_stats = RelationshipStats(
+            total=int(stats["total_count"]),
+            informal=int(stats["informal_count"]),
+            formal=int(stats["formal_count"]),
+            teasing=int(stats["teasing_count"]),
+            samples=list(stats.get("samples", [])),
+        )
+        return build_relationship_hint(addressee_name, relationship_stats)
+
     async def _generate_reply(
         self,
         username: str,
@@ -398,6 +624,7 @@ class BotDouble:
         requester_profile: Optional[RequesterProfile],
         persona_gender: Optional[str],
         style_summary: Optional[str],
+        relationship_hint: Optional[str],
     ) -> str:
         loop = asyncio.get_running_loop()
         style_samples = [StyleSample(text=sample) for sample in samples]
@@ -413,6 +640,44 @@ class BotDouble:
             requester_profile,
             persona_gender,
             style_summary,
+            relationship_hint,
+        )
+
+    async def _generate_dialogue(
+        self,
+        username_a: str,
+        persona_name_a: str,
+        samples_a: List[str],
+        style_summary_a: Optional[str],
+        relationship_hint_a: Optional[str],
+        username_b: str,
+        persona_name_b: str,
+        samples_b: List[str],
+        style_summary_b: Optional[str],
+        relationship_hint_b: Optional[str],
+        topic: str,
+    ) -> str:
+        loop = asyncio.get_running_loop()
+        participant_a = DialogueParticipant(
+            username=username_a,
+            name=persona_name_a,
+            samples=[StyleSample(text=sample) for sample in samples_a],
+            style_summary=style_summary_a,
+            relationship_hint=relationship_hint_a,
+        )
+        participant_b = DialogueParticipant(
+            username=username_b,
+            name=persona_name_b,
+            samples=[StyleSample(text=sample) for sample in samples_b],
+            style_summary=style_summary_b,
+            relationship_hint=relationship_hint_b,
+        )
+        return await loop.run_in_executor(
+            None,
+            self._style.generate_dialogue,
+            participant_a,
+            participant_b,
+            topic,
         )
 
     async def _collect_style_samples(
@@ -617,6 +882,7 @@ def run_bot(settings: Settings) -> None:
     application.add_handler(CommandHandler("imitate_profiles", bot.imitate_profiles))
     application.add_handler(CommandHandler("auto_imitate_on", bot.auto_imitate_on))
     application.add_handler(CommandHandler("auto_imitate_off", bot.auto_imitate_off))
+    application.add_handler(CommandHandler("dialogue", bot.dialogue))
     application.add_handler(CommandHandler("forgetme", bot.forget_me))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, bot.on_new_members))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.on_text_message))

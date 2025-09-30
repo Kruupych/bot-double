@@ -40,6 +40,15 @@ class RequesterProfile:
     is_same_person: bool
 
 
+@dataclass(slots=True)
+class DialogueParticipant:
+    username: str
+    name: str
+    samples: List[StyleSample]
+    style_summary: Optional[str]
+    relationship_hint: Optional[str]
+
+
 class StyleEngine:
     def __init__(
         self,
@@ -66,6 +75,7 @@ class StyleEngine:
         requester: Optional[RequesterProfile] = None,
         persona_gender: Optional[str] = None,
         style_summary: Optional[str] = None,
+        relationship_hint: Optional[str] = None,
     ) -> str:
         sample_block = "\n".join(f"- {sample.text}" for sample in samples)
         if not sample_block:
@@ -74,6 +84,12 @@ class StyleEngine:
         summary_section = ""
         if style_summary:
             summary_section = f"Характеристика стиля:\n{style_summary}\n\n"
+
+        relationship_section = ""
+        if relationship_hint:
+            relationship_section = (
+                f"Особенности отношений с адресатом:\n{relationship_hint}\n\n"
+            )
 
         context_section = ""
         if context:
@@ -118,6 +134,7 @@ class StyleEngine:
             f" (username: @{username}).\n\n"
             f"Примеры сообщений (без имен):\n{sample_block}\n\n"
             f"{summary_section}"
+            f"{relationship_section}"
             f"{context_section}"
             f"{peer_section}"
             f"{requester_section}"
@@ -177,3 +194,56 @@ class StyleEngine:
                 " глаголов и местоимений, если это уместно." "\n\n"
             )
         return ""
+
+    def generate_dialogue(
+        self,
+        participant_a: DialogueParticipant,
+        participant_b: DialogueParticipant,
+        topic: str,
+    ) -> str:
+        if not participant_a.samples or not participant_b.samples:
+            raise ValueError("Both participants must have style samples for dialogue")
+
+        topic_text = topic.strip() or "свободную тему"
+
+        def _participant_section(participant: DialogueParticipant) -> str:
+            sample_block = "\n".join(f"- {sample.text}" for sample in participant.samples)
+            summary = participant.style_summary or ""
+            relationship = participant.relationship_hint or ""
+            parts: List[str] = [f"Примеры речи:\n{sample_block}"]
+            if summary:
+                parts.append(f"Стиль: {summary}")
+            if relationship:
+                parts.append(f"Отношения с собеседником: {relationship}")
+            return "\n".join(parts)
+
+        participant_sections = (
+            f"{participant_a.name} (@{participant_a.username}):\n{_participant_section(participant_a)}\n\n"
+            f"{participant_b.name} (@{participant_b.username}):\n{_participant_section(participant_b)}"
+        )
+
+        prompt = (
+            "Составь короткий диалог между двумя участниками чата."
+            f" Тема беседы: {topic_text}.\n\n"
+            "Участники и их стиль:\n"
+            f"{participant_sections}\n\n"
+            "Сгенерируй 4-6 реплик, чередуя участников."
+            " Каждый ответ пишется в одну строку в формате 'Имя: текст'."
+            " Учитывай стиль каждого и указанные отношения."
+            " Реплики должны быть естественными и развивать тему."
+        )
+
+        response = self._client.responses.create(
+            model=self._model,
+            input=[
+                {
+                    "role": "system",
+                    "content": SYSTEM_PROMPT,
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+        )
+        return response.output_text.strip()
