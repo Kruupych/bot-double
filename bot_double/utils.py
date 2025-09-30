@@ -32,14 +32,24 @@ def should_store_message(
         return False
     if message.forward_origin is not None:
         return False
-    # Strip markup and count words
-    tokens = message.text.replace("\n", " ").split()
+    return _passes_text_filters(message.text, min_tokens=min_tokens)
+
+
+def _passes_text_filters(text: str, *, min_tokens: int) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    tokens = stripped.replace("\n", " ").split()
     if len(tokens) < min_tokens:
         return False
-    lowered = message.text.lower()
+    lowered = stripped.lower()
     if "http://" in lowered or "https://" in lowered:
         return False
     return True
+
+
+def should_store_context_snippet(text: str, *, min_tokens: int) -> bool:
+    return _passes_text_filters(text, min_tokens=min_tokens)
 
 
 _FEMALE_ENDINGS = ("а", "я", "ия", "ля", "ся", "на", "ра")

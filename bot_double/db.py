@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS messages (
     user_id INTEGER NOT NULL,
     text TEXT NOT NULL,
     timestamp INTEGER NOT NULL,
+    context_only INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
@@ -41,8 +42,7 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
         self._max_messages_per_user = max_messages_per_user
-        with self._conn:
-            self._conn.executescript(SCHEMA)
+        self._ensure_schema()
 
     def close(self) -> None:
         self._conn.close()
@@ -82,11 +82,16 @@ class Database:
             return int(row["id"])
 
     # --- message helpers --------------------------------------------------------------
-    def store_message(self, chat_id: int, user_id: int, text: str, timestamp: int) -> None:
+    def store_message(
+        self, chat_id: int, user_id: int, text: str, timestamp: int, *, context_only: bool = False
+    ) -> None:
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO messages (chat_id, user_id, text, timestamp) VALUES (?, ?, ?, ?)",
-                (chat_id, user_id, text, timestamp),
+                """
+                INSERT INTO messages (chat_id, user_id, text, timestamp, context_only)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (chat_id, user_id, text, timestamp, 1 if context_only else 0),
             )
             overflow = self._count_messages(chat_id, user_id) - self._max_messages_per_user
             if overflow > 0:
@@ -116,13 +121,26 @@ class Database:
 
     def get_random_messages(self, chat_id: int, user_id: int, limit: int) -> List[str]:
         cursor = self._conn.execute(
-            "SELECT text FROM messages WHERE chat_id = ? AND user_id = ? ORDER BY RANDOM() LIMIT ?",
+            """
+            SELECT text FROM messages
+            WHERE chat_id = ? AND user_id = ? AND context_only = 0
+            ORDER BY RANDOM()
+            LIMIT ?
+            """,
             (chat_id, user_id, limit),
         )
         return [row["text"] for row in cursor.fetchall()]
 
     def get_message_count(self, chat_id: int, user_id: int) -> int:
-        return self._count_messages(chat_id, user_id)
+        cursor = self._conn.execute(
+            """
+            SELECT COUNT(*) as cnt FROM messages
+            WHERE chat_id = ? AND user_id = ? AND context_only = 0
+            """,
+            (chat_id, user_id),
+        )
+        row = cursor.fetchone()
+        return int(row["cnt"]) if row else 0
 
     def get_user_by_username(self, username: str) -> Optional[sqlite3.Row]:
         cursor = self._conn.execute(
@@ -145,7 +163,7 @@ class Database:
             SELECT u.username, u.first_name, u.last_name, COUNT(m.id) as message_count
             FROM users u
             JOIN messages m ON m.user_id = u.id
-            WHERE m.chat_id = ?
+            WHERE m.chat_id = ? AND m.context_only = 0
             GROUP BY u.id
             ORDER BY message_count DESC
             """,
@@ -161,7 +179,7 @@ class Database:
         cursor = self._conn.execute(
             """
             SELECT text FROM messages
-            WHERE chat_id = ? AND user_id = ?
+            WHERE chat_id = ? AND user_id = ? AND context_only = 0
             ORDER BY timestamp DESC, id DESC
             LIMIT ?
             """,
@@ -222,7 +240,7 @@ class Database:
             SELECT u.id, u.username, u.first_name, u.last_name, COUNT(m.id) as message_count
             FROM users u
             JOIN messages m ON m.user_id = u.id
-            WHERE m.chat_id = ? {exclusion_clause}
+            WHERE m.chat_id = ? AND m.context_only = 0 {exclusion_clause}
             GROUP BY u.id
             ORDER BY message_count DESC
             LIMIT ?
@@ -230,6 +248,22 @@ class Database:
             (*params, limit),
         )
         return cursor.fetchall()
+
+    def _ensure_schema(self) -> None:
+        with self._conn:
+            self._conn.executescript(SCHEMA)
+            self._maybe_add_column(
+                "messages",
+                "context_only",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
+
+    def _maybe_add_column(self, table: str, column: str, definition: str) -> None:
+        cursor = self._conn.execute(f"PRAGMA table_info({table})")
+        existing = {row["name"] for row in cursor.fetchall()}
+        if column in existing:
+            return
+        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def delete_user_data(self, telegram_id: int) -> bool:
         with self._lock, self._conn:

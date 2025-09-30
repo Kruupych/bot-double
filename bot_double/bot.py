@@ -27,7 +27,12 @@ from .style_engine import (
     StyleEngine,
     StyleSample,
 )
-from .utils import display_name, guess_gender, should_store_message
+from .utils import (
+    display_name,
+    guess_gender,
+    should_store_context_snippet,
+    should_store_message,
+)
 
 LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -278,15 +283,19 @@ class BotDouble:
 
     # --- internal helpers -----------------------------------------------------------
     async def _capture_message(self, message: Message) -> None:
-        if not should_store_message(
-            message,
-            min_tokens=self._settings.min_tokens_to_store,
-            allowed_bot_id=self._bot_id,
-        ):
-            return
         if message.from_user is None:
             return
         user = message.from_user
+        text = message.text or ""
+        if not text:
+            return
+        if user.is_bot:
+            if self._bot_id is None or user.id != self._bot_id:
+                return
+        if message.via_bot is not None:
+            return
+        if message.forward_origin is not None:
+            return
         user_id = await self._run_db(
             self._db.upsert_user,
             user.id,
@@ -297,13 +306,48 @@ class BotDouble:
         if user.is_bot and user.id == self._bot_id:
             self._bot_user_id = user_id
         timestamp = int(message.date.timestamp())
-        await self._run_db(
-            self._db.store_message,
-            message.chat_id,
-            user_id,
-            message.text or "",
-            timestamp,
-        )
+        if should_store_message(
+            message,
+            min_tokens=self._settings.min_tokens_to_store,
+            allowed_bot_id=self._bot_id,
+        ):
+            await self._run_db(
+                self._db.store_message,
+                message.chat_id,
+                user_id,
+                text,
+                timestamp,
+                context_only=False,
+            )
+
+        context_snippet = self._extract_command_context(text)
+        if context_snippet and should_store_context_snippet(
+            context_snippet, min_tokens=self._settings.min_tokens_to_store
+        ):
+            await self._run_db(
+                self._db.store_message,
+                message.chat_id,
+                user_id,
+                context_snippet,
+                timestamp,
+                context_only=True,
+            )
+
+    def _extract_command_context(self, text: str) -> Optional[str]:
+        stripped = text.strip()
+        if not stripped.startswith("/"):
+            return None
+        parts = stripped.split(maxsplit=1)
+        if not parts:
+            return None
+        command_token = parts[0]
+        command = command_token.split("@", maxsplit=1)[0].lower()
+        if command != "/imitate":
+            return None
+        if len(parts) < 2:
+            return None
+        remainder = parts[1].strip()
+        return remainder or None
 
     def _extract_mentions(self, message: Message) -> List[str]:
         entities = message.parse_entities([MessageEntity.MENTION])
