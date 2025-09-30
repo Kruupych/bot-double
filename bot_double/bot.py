@@ -6,7 +6,7 @@ import random
 from functools import partial
 from typing import Any, Callable, List, Optional, Set, TypeVar
 
-from telegram import Message, MessageEntity, Update
+from telegram import Message, MessageEntity, Update, User
 from telegram.constants import ParseMode
 from telegram.ext import (
     AIORateLimiter,
@@ -20,7 +20,13 @@ from telegram.ext import (
 
 from .config import Settings
 from .db import Database
-from .style_engine import ContextMessage, ParticipantProfile, StyleEngine, StyleSample
+from .style_engine import (
+    ContextMessage,
+    ParticipantProfile,
+    RequesterProfile,
+    StyleEngine,
+    StyleSample,
+)
 from .utils import display_name, should_store_message
 
 LOGGER = logging.getLogger(__name__)
@@ -114,6 +120,7 @@ class BotDouble:
         )
         context_messages = await self._get_dialog_context(chat.id)
         peer_profiles = await self._collect_peer_profiles(chat.id, int(user_row["id"]))
+        requester_profile = await self._collect_requester_profile(chat.id, message.from_user)
         try:
             ai_reply = await self._generate_reply(
                 username,
@@ -122,6 +129,7 @@ class BotDouble:
                 starter,
                 context_messages,
                 peer_profiles,
+                requester_profile,
             )
         except Exception as exc:  # pragma: no cover - network errors etc.
             LOGGER.exception("Failed to generate imitation", exc_info=exc)
@@ -221,6 +229,7 @@ class BotDouble:
         )
         context_messages = await self._get_dialog_context(chat.id)
         peer_profiles = await self._collect_peer_profiles(chat.id, int(user_row["id"]))
+        requester_profile = await self._collect_requester_profile(chat.id, message.from_user)
         try:
             ai_reply = await self._generate_reply(
                 username,
@@ -229,6 +238,7 @@ class BotDouble:
                 starter,
                 context_messages,
                 peer_profiles,
+                requester_profile,
             )
         except Exception as exc:  # pragma: no cover - network errors etc.
             LOGGER.exception("Auto imitation failed", exc_info=exc)
@@ -310,6 +320,7 @@ class BotDouble:
         starter: str,
         context_messages: Optional[List[ContextMessage]],
         peer_profiles: Optional[List[ParticipantProfile]],
+        requester_profile: Optional[RequesterProfile],
     ) -> str:
         loop = asyncio.get_running_loop()
         style_samples = [StyleSample(text=sample) for sample in samples]
@@ -322,6 +333,7 @@ class BotDouble:
             starter,
             context_messages,
             peer_profiles,
+            requester_profile,
         )
 
     async def _collect_style_samples(self, chat_id: int, user_id: int) -> List[str]:
@@ -399,6 +411,31 @@ class BotDouble:
                 continue
             profiles.append(ParticipantProfile(name=name, samples=formatted))
         return profiles or None
+
+    async def _collect_requester_profile(
+        self, chat_id: int, user
+    ) -> Optional[RequesterProfile]:
+        if user is None:
+            return None
+        requester_internal_id = await self._run_db(
+            self._db.upsert_user,
+            user.id,
+            user.username,
+            user.first_name,
+            user.last_name,
+        )
+        sample_limit = max(self._settings.style_recent_messages, 3)
+        samples = await self._run_db(
+            self._db.get_recent_messages_for_user,
+            chat_id,
+            requester_internal_id,
+            sample_limit,
+        )
+        formatted = [text.strip() for text in samples if text.strip()]
+        if not formatted:
+            return None
+        name = display_name(user.username, user.first_name, user.last_name)
+        return RequesterProfile(name=name, samples=formatted[:sample_limit])
 
     async def _run_db(self, func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         loop = asyncio.get_running_loop()

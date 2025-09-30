@@ -33,6 +33,12 @@ class ParticipantProfile:
     samples: List[str]
 
 
+@dataclass(slots=True)
+class RequesterProfile:
+    name: str
+    samples: List[str]
+
+
 class StyleEngine:
     def __init__(self, api_key: str, model: str = "gpt-5-nano") -> None:
         self._client = OpenAI(api_key=api_key)
@@ -46,6 +52,7 @@ class StyleEngine:
         starter: str,
         context: Optional[List[ContextMessage]] = None,
         peers: Optional[List[ParticipantProfile]] = None,
+        requester: Optional[RequesterProfile] = None,
     ) -> str:
         sample_block = "\n".join(f"- {sample.text}" for sample in samples)
         if not sample_block:
@@ -69,12 +76,20 @@ class StyleEngine:
             if peer_lines:
                 peer_section = "Другие участники и их манера:\n" + "\n".join(peer_lines) + "\n\n"
 
+        requester_section = ""
+        if requester and requester.samples:
+            joined = " / ".join(requester.samples)
+            requester_section = (
+                f"Вопрос задаёт {requester.name}. Он обычно пишет так: {joined}.\n\n"
+            )
+
         prompt = (
             f"Собери ответ в стиле пользователя {display_name}"
             f" (username: @{username}).\n\n"
             f"Примеры сообщений (без имен):\n{sample_block}\n\n"
             f"{context_section}"
             f"{peer_section}"
+            f"{requester_section}"
             f"Текст для ответа: {starter}\n\n"
             "Сформируй один ответ, как будто пишет сам пользователь."
             " Держи его тон, длину и структуру фраз."
