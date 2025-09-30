@@ -35,6 +35,31 @@ def should_store_message(
     return _passes_text_filters(message.text, min_tokens=min_tokens)
 
 
+def is_bufferable_message(
+    message: Message, *, allowed_bot_id: Optional[int] = None
+) -> bool:
+    if message.from_user and message.from_user.is_bot:
+        if allowed_bot_id is None or message.from_user.id != allowed_bot_id:
+            return False
+    text = message.text or ""
+    if not text:
+        return False
+    if text.startswith("/"):
+        return False
+    if text.startswith("!"):
+        return False
+    if text.startswith("."):
+        return False
+    if message.via_bot is not None:
+        return False
+    if message.forward_origin is not None:
+        return False
+    lowered = text.lower()
+    if "http://" in lowered or "https://" in lowered:
+        return False
+    return True
+
+
 def _passes_text_filters(text: str, *, min_tokens: int) -> bool:
     stripped = text.strip()
     if not stripped:

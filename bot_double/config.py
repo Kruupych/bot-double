@@ -27,6 +27,7 @@ class Settings:
     min_tokens_to_store: int = 3
     peer_profile_count: int = 3
     peer_profile_samples: int = 2
+    short_message_buffer_seconds: int = 10
 
 
 class SettingsError(RuntimeError):
@@ -97,6 +98,7 @@ def load_settings() -> Settings:
     peer_profile_count = _get_env_int("PEER_PROFILE_COUNT", 3, minimum=0)
     peer_profile_samples = _get_env_int("PEER_PROFILE_SAMPLES", 2, minimum=0)
     min_tokens_to_store = _get_env_int("MIN_TOKENS_TO_STORE", 3, minimum=1)
+    short_buffer_seconds = _get_env_int("SHORT_MESSAGE_BUFFER_SECONDS", 10, minimum=1)
 
     return Settings(
         bot_token=bot_token,
@@ -114,4 +116,5 @@ def load_settings() -> Settings:
         min_tokens_to_store=min_tokens_to_store,
         peer_profile_count=peer_profile_count,
         peer_profile_samples=peer_profile_samples,
+        short_message_buffer_seconds=short_buffer_seconds,
     )

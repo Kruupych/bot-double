@@ -4,8 +4,9 @@ import asyncio
 import logging
 import random
 import re
+from dataclasses import dataclass
 from functools import partial
-from typing import Any, Callable, List, Optional, Set, TypeVar
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TypeVar
 
 from telegram import Message, MessageEntity, Update, User
 from telegram.constants import ParseMode
@@ -38,12 +39,23 @@ from .style_analysis import build_style_summary
 from .utils import (
     display_name,
     guess_gender,
+    is_bufferable_message,
     should_store_context_snippet,
     should_store_message,
 )
 
 LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
+
+
+@dataclass
+class _PendingBuffer:
+    chat_id: int
+    user_id: int
+    texts: List[str]
+    last_timestamp: int
+    last_message: Message
+    task: Optional[asyncio.Task] = None
 
 
 class BotDouble:
@@ -59,6 +71,8 @@ class BotDouble:
         self._bot_id: Optional[int] = None
         self._bot_name: str = "Бот-Двойник"
         self._bot_user_id: Optional[int] = None
+        self._message_buffers: Dict[Tuple[int, int], "_PendingBuffer"] = {}
+        self._buffer_lock = asyncio.Lock()
 
     def build_application(self) -> Application:
         return (
@@ -88,6 +102,7 @@ class BotDouble:
 
     async def _post_shutdown(self, application: Application) -> None:
         LOGGER.info("Bot shutting down")
+        await self._flush_all_buffers()
         self._db.close()
 
     # --- handlers ------------------------------------------------------------------
@@ -456,11 +471,17 @@ class BotDouble:
         if user.is_bot and user.id == self._bot_id:
             self._bot_user_id = user_id
         timestamp = int(message.date.timestamp())
-        if should_store_message(
+        should_store = should_store_message(
             message,
             min_tokens=self._settings.min_tokens_to_store,
             allowed_bot_id=self._bot_id,
-        ):
+        )
+
+        stored_text: Optional[str] = None
+
+        key = (message.chat_id, user_id)
+        if should_store:
+            await self._flush_buffer_for_key(key)
             await self._run_db(
                 self._db.store_message,
                 message.chat_id,
@@ -469,6 +490,12 @@ class BotDouble:
                 timestamp,
                 context_only=False,
             )
+            stored_text = text
+        elif is_bufferable_message(
+            message, allowed_bot_id=self._bot_id
+        ):
+            await self._buffer_short_message(key, message, user_id, text, timestamp)
+            return
 
         context_snippet = self._extract_command_context(text)
         if context_snippet and should_store_context_snippet(
@@ -483,7 +510,8 @@ class BotDouble:
                 context_only=True,
             )
 
-        await self._update_pair_interactions(message, user_id, text)
+        if stored_text:
+            await self._update_pair_interactions(message, user_id, stored_text)
 
     def _extract_command_context(self, text: str) -> Optional[str]:
         stripped = text.strip()
@@ -612,6 +640,87 @@ class BotDouble:
             samples=list(stats.get("samples", [])),
         )
         return build_relationship_hint(addressee_name, relationship_stats)
+
+    async def _buffer_short_message(
+        self,
+        key: Tuple[int, int],
+        message: Message,
+        user_id: int,
+        text: str,
+        timestamp: int,
+    ) -> None:
+        chat_id = message.chat_id
+        if chat_id is None:
+            return
+        normalized = text.strip()
+        if not normalized:
+            return
+        async with self._buffer_lock:
+            buffer = self._message_buffers.get(key)
+            if buffer is None:
+                buffer = _PendingBuffer(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    texts=[normalized],
+                    last_timestamp=timestamp,
+                    last_message=message,
+                )
+                self._message_buffers[key] = buffer
+            else:
+                buffer.texts.append(normalized)
+                buffer.last_timestamp = timestamp
+                buffer.last_message = message
+                if buffer.task:
+                    buffer.task.cancel()
+            buffer.task = asyncio.create_task(self._delayed_flush(key))
+
+    async def _delayed_flush(self, key: Tuple[int, int]) -> None:
+        try:
+            await asyncio.sleep(self._settings.short_message_buffer_seconds)
+            await self._flush_buffer_for_key(key)
+        except asyncio.CancelledError:  # pragma: no cover - cooperative cancel
+            return
+
+    async def _flush_buffer_for_key(self, key: Tuple[int, int]) -> None:
+        async with self._buffer_lock:
+            buffer = self._message_buffers.get(key)
+            if not buffer or not buffer.texts:
+                if buffer and buffer.task:
+                    buffer.task.cancel()
+                    buffer.task = None
+                return
+            if buffer.task:
+                buffer.task.cancel()
+                buffer.task = None
+            combined_text = " ".join(buffer.texts).strip()
+            last_message = buffer.last_message
+            timestamp = buffer.last_timestamp
+            chat_id = buffer.chat_id
+            user_id = buffer.user_id
+            del self._message_buffers[key]
+
+        if not combined_text:
+            return
+        if not should_store_context_snippet(
+            combined_text, min_tokens=self._settings.min_tokens_to_store
+        ):
+            return
+
+        await self._run_db(
+            self._db.store_message,
+            chat_id,
+            user_id,
+            combined_text,
+            timestamp,
+            context_only=False,
+        )
+        await self._update_pair_interactions(last_message, user_id, combined_text)
+
+    async def _flush_all_buffers(self) -> None:
+        async with self._buffer_lock:
+            keys = list(self._message_buffers.keys())
+        for key in keys:
+            await self._flush_buffer_for_key(key)
 
     async def _generate_reply(
         self,
