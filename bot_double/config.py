@@ -31,6 +31,10 @@ class Settings:
     relationship_analysis_model: Optional[str] = None
     relationship_analysis_min_pending: int = 5
     relationship_analysis_min_hours: int = 24
+    persona_analysis_model: Optional[str] = None
+    persona_analysis_min_messages: int = 50
+    persona_analysis_max_messages: int = 100
+    persona_analysis_min_hours: int = 24
 
 
 class SettingsError(RuntimeError):
@@ -105,6 +109,23 @@ def load_settings() -> Settings:
     rel_model = os.getenv("RELATIONSHIP_ANALYSIS_MODEL")
     rel_min_pending = _get_env_int("RELATIONSHIP_ANALYSIS_MIN_PENDING", 5, minimum=1)
     rel_min_hours = _get_env_int("RELATIONSHIP_ANALYSIS_MIN_HOURS", 24, minimum=0)
+    persona_model = os.getenv("PERSONA_ANALYSIS_MODEL")
+    persona_min_msgs = _get_env_int(
+        "PERSONA_ANALYSIS_MIN_MESSAGES", 50, minimum=10
+    )
+    persona_max_msgs = _get_env_int(
+        "PERSONA_ANALYSIS_MAX_MESSAGES", 100, minimum=persona_min_msgs
+    )
+    persona_min_hours = _get_env_int("PERSONA_ANALYSIS_MIN_HOURS", 24, minimum=0)
+
+    if rel_model == "":
+        rel_model = None
+    if persona_model == "":
+        persona_model = None
+    if rel_model is None:
+        rel_model = openai_model
+    if persona_model is None:
+        persona_model = openai_model
 
     return Settings(
         bot_token=bot_token,
@@ -126,4 +147,8 @@ def load_settings() -> Settings:
         relationship_analysis_model=rel_model,
         relationship_analysis_min_pending=rel_min_pending,
         relationship_analysis_min_hours=rel_min_hours,
+        persona_analysis_model=persona_model,
+        persona_analysis_min_messages=persona_min_msgs,
+        persona_analysis_max_messages=persona_max_msgs,
+        persona_analysis_min_hours=persona_min_hours,
     )

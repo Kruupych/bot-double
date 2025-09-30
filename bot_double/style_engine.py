@@ -46,6 +46,7 @@ class DialogueParticipant:
     name: str
     samples: List[StyleSample]
     style_summary: Optional[str]
+    persona_card: Optional[str]
     relationship_hint: Optional[str]
 
 
@@ -75,6 +76,7 @@ class StyleEngine:
         requester: Optional[RequesterProfile] = None,
         persona_gender: Optional[str] = None,
         style_summary: Optional[str] = None,
+        persona_card: Optional[str] = None,
         relationship_hint: Optional[str] = None,
     ) -> str:
         sample_block = "\n".join(f"- {sample.text}" for sample in samples)
@@ -84,6 +86,10 @@ class StyleEngine:
         summary_section = ""
         if style_summary:
             summary_section = f"Характеристика стиля:\n{style_summary}\n\n"
+
+        persona_section = ""
+        if persona_card:
+            persona_section = f"Карточка персоны:\n{persona_card}\n\n"
 
         relationship_section = ""
         if relationship_hint:
@@ -134,6 +140,7 @@ class StyleEngine:
             f" (username: @{username}).\n\n"
             f"Примеры сообщений (без имен):\n{sample_block}\n\n"
             f"{summary_section}"
+            f"{persona_section}"
             f"{relationship_section}"
             f"{context_section}"
             f"{peer_section}"
@@ -209,10 +216,13 @@ class StyleEngine:
         def _participant_section(participant: DialogueParticipant) -> str:
             sample_block = "\n".join(f"- {sample.text}" for sample in participant.samples)
             summary = participant.style_summary or ""
+            persona_card = participant.persona_card or ""
             relationship = participant.relationship_hint or ""
             parts: List[str] = [f"Примеры речи:\n{sample_block}"]
             if summary:
                 parts.append(f"Стиль: {summary}")
+            if persona_card:
+                parts.append(f"Персона: {persona_card}")
             if relationship:
                 parts.append(f"Особенности общения: {relationship}")
             return "\n".join(parts)

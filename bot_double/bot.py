@@ -38,6 +38,7 @@ from .relationship_analysis import (
     evaluate_interaction,
 )
 from .social_analysis import InteractionExcerpt, SocialAnalyzer
+from .persona_analysis import PersonaAnalyzer, PersonaSample
 from .style_analysis import build_style_summary
 from .utils import (
     display_name,
@@ -77,6 +78,16 @@ class BotDouble:
             analysis_model,
             reasoning_effort=settings.openai_reasoning_effort,
         )
+        persona_model = settings.persona_analysis_model
+        self._persona_analyzer = (
+            PersonaAnalyzer(
+                settings.openai_api_key,
+                persona_model,
+                reasoning_effort=settings.openai_reasoning_effort,
+            )
+            if persona_model
+            else None
+        )
         self._bot_id: Optional[int] = None
         self._bot_name: str = "Бот-Двойник"
         self._bot_user_id: Optional[int] = None
@@ -85,6 +96,9 @@ class BotDouble:
         self._analysis_queue: Optional[asyncio.Queue[Tuple[int, int, int]]] = None
         self._analysis_inflight: Set[Tuple[int, int, int]] = set()
         self._analysis_worker: Optional[asyncio.Task] = None
+        self._persona_queue: Optional[asyncio.Queue[Tuple[int, int]]] = None
+        self._persona_inflight: Set[Tuple[int, int]] = set()
+        self._persona_worker: Optional[asyncio.Task] = None
 
     def build_application(self) -> Application:
         return (
@@ -117,11 +131,16 @@ class BotDouble:
             self._analysis_worker = asyncio.create_task(
                 self._relationship_analysis_worker()
             )
+        if self._persona_analyzer is not None and self._persona_queue is None:
+            self._persona_queue = asyncio.Queue()
+        if self._persona_analyzer is not None and self._persona_worker is None:
+            self._persona_worker = asyncio.create_task(self._persona_analysis_worker())
 
     async def _post_shutdown(self, application: Application) -> None:
         LOGGER.info("Bot shutting down")
         await self._flush_all_buffers()
         await self._stop_analysis_worker()
+        await self._stop_persona_worker()
         self._db.close()
 
     # --- handlers ------------------------------------------------------------------
@@ -169,7 +188,8 @@ class BotDouble:
             )
             return
 
-        style_summary = build_style_summary(samples)
+        persona_card = await self._get_persona_card(chat.id, int(user_row["id"]))
+        style_summary = None if persona_card else build_style_summary(samples)
 
         persona_name = display_name(
             user_row["username"], user_row["first_name"], user_row["last_name"]
@@ -197,16 +217,17 @@ class BotDouble:
         try:
             ai_reply = await self._generate_reply(
                 username,
-                persona_name,
-                samples,
-                starter,
-                context_messages,
-                peer_profiles,
-                requester_profile,
-                persona_gender,
-                style_summary,
-                relationship_hint,
-            )
+            persona_name,
+            samples,
+            starter,
+            context_messages,
+            peer_profiles,
+            requester_profile,
+            persona_gender,
+            style_summary,
+            persona_card,
+            relationship_hint,
+        )
         except Exception as exc:  # pragma: no cover - network errors etc.
             LOGGER.exception("Failed to generate imitation", exc_info=exc)
             await message.reply_text("Не удалось получить ответ от модели, попробуйте позже")
@@ -304,7 +325,8 @@ class BotDouble:
         if not samples:
             return
 
-        style_summary = build_style_summary(samples)
+        persona_card = await self._get_persona_card(chat.id, int(user_row["id"]))
+        style_summary = None if persona_card else build_style_summary(samples)
 
         persona_name = display_name(
             user_row["username"], user_row["first_name"], user_row["last_name"]
@@ -340,6 +362,7 @@ class BotDouble:
                 requester_profile,
                 persona_gender,
                 style_summary,
+                persona_card,
                 relationship_hint,
             )
         except Exception as exc:  # pragma: no cover - network errors etc.
@@ -428,8 +451,10 @@ class BotDouble:
             row_b["username"], row_b["first_name"], row_b["last_name"]
         )
 
-        style_summary_a = build_style_summary(samples_a)
-        style_summary_b = build_style_summary(samples_b)
+        persona_card_a = await self._get_persona_card(chat.id, internal_a)
+        persona_card_b = await self._get_persona_card(chat.id, internal_b)
+        style_summary_a = None if persona_card_a else build_style_summary(samples_a)
+        style_summary_b = None if persona_card_b else build_style_summary(samples_b)
 
         relationship_hint_a = await self._relationship_hint_for_addressee(
             chat.id,
@@ -450,11 +475,13 @@ class BotDouble:
                 persona_name_a,
                 samples_a,
                 style_summary_a,
+                persona_card_a,
                 relationship_hint_a,
                 username_b,
                 persona_name_b,
                 samples_b,
                 style_summary_b,
+                persona_card_b,
                 relationship_hint_b,
                 topic or ""
             )
@@ -531,6 +558,7 @@ class BotDouble:
 
         if stored_text:
             await self._update_pair_interactions(message, user_id, stored_text)
+            await self._note_persona_message(message.chat_id, user_id, timestamp)
 
     def _extract_command_context(self, text: str) -> Optional[str]:
         stripped = text.strip()
@@ -601,7 +629,9 @@ class BotDouble:
                 full_text=stripped,
                 timestamp=timestamp,
             )
-            await self._maybe_queue_analysis(chat_id, speaker_internal_id, target_id)
+            await self._maybe_queue_relationship_analysis(
+                chat_id, speaker_internal_id, target_id
+            )
 
     def _extract_mentions(self, message: Message) -> List[str]:
         entities = message.parse_entities([MessageEntity.MENTION])
@@ -665,7 +695,65 @@ class BotDouble:
         )
         return build_relationship_hint(addressee_name, relationship_stats)
 
-    async def _maybe_queue_analysis(
+    async def _get_persona_card(self, chat_id: int, user_id: int) -> Optional[str]:
+        profile = await self._run_db(
+            self._db.get_persona_profile,
+            chat_id,
+            user_id,
+        )
+        if not profile:
+            return None
+        lines: List[str] = []
+        summary = profile.get("summary")
+        if summary:
+            summary = str(summary).strip()
+            if summary:
+                lines.append(summary)
+        details = profile.get("details")
+        if details:
+            try:
+                data = json.loads(details)
+            except json.JSONDecodeError:
+                data = None
+            if isinstance(data, dict):
+                interests = data.get("interests")
+                if isinstance(interests, list) and interests:
+                    joined = ", ".join(str(item) for item in interests if item)
+                    if joined:
+                        lines.append(f"Интересы: {joined}")
+                humor = str(data.get("humor_style", "")).strip()
+                if humor and humor.lower() != "unknown":
+                    lines.append(f"Чувство юмора: {humor}")
+                emotionality = str(data.get("emotionality", "")).strip()
+                if emotionality and emotionality.lower() != "unknown":
+                    lines.append(f"Эмоциональность: {emotionality}")
+                tonality = str(data.get("tonality", "")).strip()
+                if tonality and tonality.lower() != "unknown":
+                    lines.append(f"Тональность: {tonality}")
+                speech_traits = data.get("speech_traits")
+                if isinstance(speech_traits, list) and speech_traits:
+                    joined = ", ".join(str(item) for item in speech_traits if item)
+                    if joined:
+                        lines.append(f"Речевые привычки: {joined}")
+                tips = str(data.get("writing_tips", "")).strip()
+                if tips and tips.lower() != "unknown":
+                    lines.append(f"Советы по стилю: {tips}")
+        persona_card = "\n".join(lines).strip()
+        return persona_card or None
+
+    async def _note_persona_message(
+        self, chat_id: Optional[int], user_id: int, timestamp: int
+    ) -> None:
+        if chat_id is None:
+            return
+        if self._persona_analyzer is None or self._persona_queue is None:
+            return
+        if self._bot_user_id is not None and user_id == self._bot_user_id:
+            return
+        await self._run_db(self._db.increment_persona_pending, chat_id, user_id)
+        await self._maybe_queue_persona_analysis(chat_id, user_id)
+
+    async def _maybe_queue_relationship_analysis(
         self, chat_id: int, speaker_id: int, target_id: int
     ) -> None:
         if self._analysis_queue is None:
@@ -694,6 +782,33 @@ class BotDouble:
             return
         await self._analysis_queue.put(key)
         self._analysis_inflight.add(key)
+
+    async def _maybe_queue_persona_analysis(self, chat_id: int, user_id: int) -> None:
+        if self._persona_queue is None or self._persona_analyzer is None:
+            return
+        key = (chat_id, user_id)
+        if key in self._persona_inflight:
+            return
+        profile = await self._run_db(
+            self._db.get_persona_profile,
+            chat_id,
+            user_id,
+        )
+        if not profile:
+            return
+        pending = int(profile.get("pending_messages", 0))
+        if pending < self._settings.persona_analysis_min_messages:
+            return
+        last_analyzed = profile.get("last_analyzed_at")
+        threshold_seconds = self._settings.persona_analysis_min_hours * 3600
+        if (
+            threshold_seconds > 0
+            and last_analyzed is not None
+            and int(time.time()) - int(last_analyzed) < threshold_seconds
+        ):
+            return
+        await self._persona_queue.put(key)
+        self._persona_inflight.add(key)
 
     async def _buffer_short_message(
         self,
@@ -769,6 +884,7 @@ class BotDouble:
             context_only=False,
         )
         await self._update_pair_interactions(last_message, user_id, combined_text)
+        await self._note_persona_message(chat_id, user_id, timestamp)
 
     async def _flush_all_buffers(self) -> None:
         async with self._buffer_lock:
@@ -787,6 +903,7 @@ class BotDouble:
         requester_profile: Optional[RequesterProfile],
         persona_gender: Optional[str],
         style_summary: Optional[str],
+        persona_card: Optional[str],
         relationship_hint: Optional[str],
     ) -> str:
         loop = asyncio.get_running_loop()
@@ -803,6 +920,7 @@ class BotDouble:
             requester_profile,
             persona_gender,
             style_summary,
+            persona_card,
             relationship_hint,
         )
 
@@ -812,11 +930,13 @@ class BotDouble:
         persona_name_a: str,
         samples_a: List[str],
         style_summary_a: Optional[str],
+        persona_card_a: Optional[str],
         relationship_hint_a: Optional[str],
         username_b: str,
         persona_name_b: str,
         samples_b: List[str],
         style_summary_b: Optional[str],
+        persona_card_b: Optional[str],
         relationship_hint_b: Optional[str],
         topic: str,
     ) -> str:
@@ -826,6 +946,7 @@ class BotDouble:
             name=persona_name_a,
             samples=[StyleSample(text=sample) for sample in samples_a],
             style_summary=style_summary_a,
+            persona_card=persona_card_a,
             relationship_hint=relationship_hint_a,
         )
         participant_b = DialogueParticipant(
@@ -833,6 +954,7 @@ class BotDouble:
             name=persona_name_b,
             samples=[StyleSample(text=sample) for sample in samples_b],
             style_summary=style_summary_b,
+            persona_card=persona_card_b,
             relationship_hint=relationship_hint_b,
         )
         return await loop.run_in_executor(
@@ -973,6 +1095,104 @@ class BotDouble:
             analyzed_at,
         )
 
+    async def _persona_analysis_worker(self) -> None:
+        assert self._persona_queue is not None
+        try:
+            while True:
+                key = await self._persona_queue.get()
+                try:
+                    await self._perform_persona_analysis(*key)
+                except Exception:
+                    LOGGER.exception("Persona analysis task failed")
+                finally:
+                    self._persona_inflight.discard(key)
+                    self._persona_queue.task_done()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self._persona_queue is not None:
+                while not self._persona_queue.empty():
+                    try:
+                        self._persona_queue.get_nowait()
+                        self._persona_queue.task_done()
+                    except asyncio.QueueEmpty:
+                        break
+
+    async def _perform_persona_analysis(self, chat_id: int, user_id: int) -> None:
+        if self._persona_analyzer is None:
+            return
+        profile = await self._run_db(
+            self._db.get_persona_profile,
+            chat_id,
+            user_id,
+        )
+        if not profile:
+            return
+        pending = int(profile.get("pending_messages", 0))
+        if pending < self._settings.persona_analysis_min_messages:
+            return
+
+        user_row = await self._run_db(self._db.get_user_by_id, user_id)
+        if user_row is None:
+            return
+
+        messages = await self._run_db(
+            self._db.get_recent_messages_with_timestamp,
+            chat_id,
+            user_id,
+            self._settings.persona_analysis_max_messages,
+        )
+        if not messages:
+            return
+
+        samples: List[PersonaSample] = []
+        for row in messages:
+            text = (row["text"] or "").strip()
+            if not text:
+                continue
+            samples.append(
+                PersonaSample(text=text, timestamp=int(row["timestamp"]))
+            )
+
+        if len(samples) < self._settings.persona_analysis_min_messages:
+            return
+
+        display = display_name(
+            user_row["username"], user_row["first_name"], user_row["last_name"]
+        )
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: self._persona_analyzer.build_persona_card(
+                display, tuple(samples)
+            ),
+        )
+        if not result:
+            return
+
+        summary = str(result.get("overall_summary", "")).strip()
+        if not summary:
+            summary = str(result.get("writing_tips", "")).strip()
+        if not summary:
+            interests = result.get("interests") or []
+            if isinstance(interests, list) and interests:
+                joined = ", ".join(str(item) for item in interests if item)
+                if joined:
+                    summary = f"Интересы: {joined}."
+        if not summary:
+            summary = "Карточка персоны обновлена."
+
+        details_json = json.dumps(result, ensure_ascii=False)
+        analyzed_at = int(time.time())
+        await self._run_db(
+            self._db.save_persona_profile,
+            chat_id,
+            user_id,
+            summary,
+            details_json,
+            analyzed_at,
+        )
+
     async def _stop_analysis_worker(self) -> None:
         if self._analysis_worker is not None:
             self._analysis_worker.cancel()
@@ -990,6 +1210,24 @@ class BotDouble:
                     break
             self._analysis_queue = None
         self._analysis_inflight.clear()
+
+    async def _stop_persona_worker(self) -> None:
+        if self._persona_worker is not None:
+            self._persona_worker.cancel()
+            try:
+                await self._persona_worker
+            except asyncio.CancelledError:
+                pass
+            self._persona_worker = None
+        if self._persona_queue is not None:
+            while not self._persona_queue.empty():
+                try:
+                    self._persona_queue.get_nowait()
+                    self._persona_queue.task_done()
+                except asyncio.QueueEmpty:
+                    break
+            self._persona_queue = None
+        self._persona_inflight.clear()
 
     async def _collect_style_samples(
         self, chat_id: int, user_id: int, *, topic_hint: Optional[str] = None

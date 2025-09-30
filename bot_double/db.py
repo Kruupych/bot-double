@@ -64,6 +64,17 @@ CREATE TABLE IF NOT EXISTS pair_interaction_messages (
 
 CREATE INDEX IF NOT EXISTS idx_pair_messages_lookup
     ON pair_interaction_messages(chat_id, speaker_id, target_id, timestamp DESC);
+
+CREATE TABLE IF NOT EXISTS persona_profiles (
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    summary TEXT,
+    details TEXT,
+    pending_messages INTEGER NOT NULL DEFAULT 0,
+    last_analyzed_at INTEGER,
+    PRIMARY KEY (chat_id, user_id),
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
 """
 
 
@@ -221,6 +232,25 @@ class Database:
         rows = cursor.fetchall()
         rows.reverse()
         return [row["text"] for row in rows]
+
+    def get_recent_messages_with_timestamp(
+        self, chat_id: int, user_id: int, limit: int
+    ) -> List[sqlite3.Row]:
+        if limit <= 0:
+            return []
+        cursor = self._conn.execute(
+            """
+            SELECT text, timestamp
+            FROM messages
+            WHERE chat_id = ? AND user_id = ? AND context_only = 0
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?
+            """,
+            (chat_id, user_id, limit),
+        )
+        rows = cursor.fetchall()
+        rows.reverse()
+        return rows
 
     def update_pair_stats(
         self,
@@ -391,6 +421,98 @@ class Database:
             "analysis_summary": row["analysis_summary"],
             "analysis_details": row["analysis_details"],
         }
+
+    def increment_persona_pending(self, chat_id: int, user_id: int) -> int:
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                """
+                SELECT pending_messages FROM persona_profiles
+                WHERE chat_id = ? AND user_id = ?
+                """,
+                (chat_id, user_id),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                pending = 1
+                self._conn.execute(
+                    """
+                    INSERT INTO persona_profiles (
+                        chat_id,
+                        user_id,
+                        summary,
+                        details,
+                        pending_messages,
+                        last_analyzed_at
+                    ) VALUES (?, ?, NULL, NULL, ?, NULL)
+                    """,
+                    (chat_id, user_id, pending),
+                )
+                return pending
+
+            pending = int(row["pending_messages"]) + 1
+            self._conn.execute(
+                """
+                UPDATE persona_profiles
+                SET pending_messages = ?
+                WHERE chat_id = ? AND user_id = ?
+                """,
+                (pending, chat_id, user_id),
+            )
+            return pending
+
+    def get_persona_profile(
+        self, chat_id: int, user_id: int
+    ) -> Optional[dict[str, object]]:
+        cursor = self._conn.execute(
+            """
+            SELECT summary, details, pending_messages, last_analyzed_at
+            FROM persona_profiles
+            WHERE chat_id = ? AND user_id = ?
+            """,
+            (chat_id, user_id),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "summary": row["summary"],
+            "details": row["details"],
+            "pending_messages": int(row["pending_messages"])
+            if row["pending_messages"] is not None
+            else 0,
+            "last_analyzed_at": int(row["last_analyzed_at"])
+            if row["last_analyzed_at"] is not None
+            else None,
+        }
+
+    def save_persona_profile(
+        self,
+        chat_id: int,
+        user_id: int,
+        summary: str,
+        details: str,
+        analyzed_at: int,
+    ) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO persona_profiles (
+                    chat_id,
+                    user_id,
+                    summary,
+                    details,
+                    pending_messages,
+                    last_analyzed_at
+                ) VALUES (?, ?, ?, ?, 0, ?)
+                ON CONFLICT(chat_id, user_id) DO UPDATE SET
+                    summary = excluded.summary,
+                    details = excluded.details,
+                    pending_messages = 0,
+                    last_analyzed_at = excluded.last_analyzed_at
+                """,
+                (chat_id, user_id, summary, details, analyzed_at),
+            )
+
 
     def get_pair_messages(
         self, chat_id: int, speaker_id: int, target_id: int, limit: int
@@ -569,6 +691,26 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_pair_messages_lookup
                 ON pair_interaction_messages(chat_id, speaker_id, target_id, timestamp DESC)
                 """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS persona_profiles (
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    summary TEXT,
+                    details TEXT,
+                    pending_messages INTEGER NOT NULL DEFAULT 0,
+                    last_analyzed_at INTEGER,
+                    PRIMARY KEY (chat_id, user_id),
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+                """
+            )
+            self._maybe_add_column(
+                "persona_profiles", "pending_messages", "INTEGER NOT NULL DEFAULT 0"
+            )
+            self._maybe_add_column(
+                "persona_profiles", "last_analyzed_at", "INTEGER"
             )
             self._maybe_add_column(
                 "pair_interactions", "pending_messages", "INTEGER NOT NULL DEFAULT 0"
