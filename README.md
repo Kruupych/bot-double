@@ -26,6 +26,8 @@ Telegram-бот, который автоматически собирает со
    PEER_PROFILE_COUNT=3
    PEER_PROFILE_SAMPLES=2
    OPENAI_MODEL=gpt-5-nano
+   OPENAI_REASONING_EFFORT=medium
+   OPENAI_TEXT_VERBOSITY=medium
    MIN_TOKENS_TO_STORE=3
    ```
 

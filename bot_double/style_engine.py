@@ -41,9 +41,17 @@ class RequesterProfile:
 
 
 class StyleEngine:
-    def __init__(self, api_key: str, model: str = "gpt-5-nano") -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "gpt-5-nano",
+        reasoning_effort: Optional[str] = None,
+        text_verbosity: Optional[str] = None,
+    ) -> None:
         self._client = OpenAI(api_key=api_key)
         self._model = model
+        self._reasoning_effort = reasoning_effort
+        self._text_verbosity = text_verbosity
 
     def generate_reply(
         self,
@@ -121,6 +129,12 @@ class StyleEngine:
             " Ответ:"
         )
 
+        kwargs: dict[str, object] = {}
+        if self._reasoning_effort:
+            kwargs["reasoning"] = {"effort": self._reasoning_effort}
+        if self._text_verbosity:
+            kwargs["text"] = {"verbosity": self._text_verbosity}
+
         response = self._client.responses.create(
             model=self._model,
             input=[
@@ -133,5 +147,6 @@ class StyleEngine:
                     "content": prompt,
                 },
             ],
+            **kwargs,
         )
         return response.output_text.strip()

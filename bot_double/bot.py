@@ -37,7 +37,12 @@ class BotDouble:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._db = Database(settings.db_path, settings.max_messages_per_user)
-        self._style = StyleEngine(settings.openai_api_key, model=settings.openai_model)
+        self._style = StyleEngine(
+            settings.openai_api_key,
+            model=settings.openai_model,
+            reasoning_effort=settings.openai_reasoning_effort,
+            text_verbosity=settings.openai_text_verbosity,
+        )
         self._bot_id: Optional[int] = None
         self._bot_name: str = "Бот-Двойник"
         self._bot_user_id: Optional[int] = None
