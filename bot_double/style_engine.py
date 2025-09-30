@@ -37,6 +37,7 @@ class ParticipantProfile:
 class RequesterProfile:
     name: str
     samples: List[str]
+    is_same_person: bool
 
 
 class StyleEngine:
@@ -82,6 +83,13 @@ class StyleEngine:
             requester_section = (
                 f"Вопрос задаёт {requester.name}. Он обычно пишет так: {joined}.\n\n"
             )
+            if requester.is_same_person:
+                requester_section += (
+                    "Это тот же человек, чей стиль нужно имитировать."
+                    " Ответ должен звучать как его собственная мысль"
+                    " или откровенный ответ самому себе, без обращения"
+                    " ко второму лицу.\n\n"
+                )
 
         prompt = (
             f"Собери ответ в стиле пользователя {display_name}"

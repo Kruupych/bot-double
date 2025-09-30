@@ -120,7 +120,9 @@ class BotDouble:
         )
         context_messages = await self._get_dialog_context(chat.id)
         peer_profiles = await self._collect_peer_profiles(chat.id, int(user_row["id"]))
-        requester_profile = await self._collect_requester_profile(chat.id, message.from_user)
+        requester_profile = await self._collect_requester_profile(
+            chat.id, message.from_user, int(user_row["id"])
+        )
         try:
             ai_reply = await self._generate_reply(
                 username,
@@ -229,7 +231,9 @@ class BotDouble:
         )
         context_messages = await self._get_dialog_context(chat.id)
         peer_profiles = await self._collect_peer_profiles(chat.id, int(user_row["id"]))
-        requester_profile = await self._collect_requester_profile(chat.id, message.from_user)
+        requester_profile = await self._collect_requester_profile(
+            chat.id, message.from_user, int(user_row["id"])
+        )
         try:
             ai_reply = await self._generate_reply(
                 username,
@@ -413,7 +417,7 @@ class BotDouble:
         return profiles or None
 
     async def _collect_requester_profile(
-        self, chat_id: int, user
+        self, chat_id: int, user: Optional[User], target_internal_id: int
     ) -> Optional[RequesterProfile]:
         if user is None:
             return None
@@ -435,7 +439,12 @@ class BotDouble:
         if not formatted:
             return None
         name = display_name(user.username, user.first_name, user.last_name)
-        return RequesterProfile(name=name, samples=formatted[:sample_limit])
+        is_same_person = requester_internal_id == target_internal_id
+        return RequesterProfile(
+            name=name,
+            samples=formatted[:sample_limit],
+            is_same_person=is_same_person,
+        )
 
     async def _run_db(self, func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         loop = asyncio.get_running_loop()
