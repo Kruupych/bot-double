@@ -116,7 +116,7 @@ class BotDouble:
             await message.reply_text("Не удалось получить ответ от модели, попробуйте позже")
             return
 
-        await message.reply_text(f"{persona_name} (AI): {ai_reply}")
+        await message.reply_text(ai_reply)
 
     async def imitate_profiles(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
@@ -221,7 +221,7 @@ class BotDouble:
             LOGGER.exception("Auto imitation failed", exc_info=exc)
             return
 
-        await message.reply_text(f"{persona_name} (AI): {ai_reply}")
+        await message.reply_text(ai_reply)
 
     async def on_new_members(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
