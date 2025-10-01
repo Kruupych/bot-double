@@ -182,6 +182,8 @@ class BotDouble:
         self._chain_by_message: Dict[Tuple[int, int], _ImitationChain] = {}
         self._last_chain_by_user: Dict[Tuple[int, int], _ImitationChain] = {}
         self._chain_cache_limit = 500
+        self._answered_messages: Dict[Tuple[int, int], int] = {}
+        self._answered_cache_limit = 1000
         if self._settings.enable_voice_transcription:
             self._transcriber = SpeechTranscriber(
                 settings.openai_api_key,
@@ -1895,6 +1897,21 @@ class BotDouble:
             if oldest_key != key:
                 self._last_chain_by_user.pop(oldest_key, None)
 
+    def _reserve_answer_slot(self, message: Message) -> bool:
+        chat_id = message.chat_id
+        message_id = getattr(message, "message_id", None)
+        if chat_id is None or message_id is None:
+            return True
+        key = (chat_id, int(message_id))
+        if key in self._answered_messages:
+            return False
+        self._answered_messages[key] = int(time.time())
+        if len(self._answered_messages) > self._answered_cache_limit:
+            oldest_key = next(iter(self._answered_messages))
+            if oldest_key != key:
+                self._answered_messages.pop(oldest_key, None)
+        return True
+
     def _normalize_chain_text(self, text: str) -> str:
         return re.sub(r"\s+", " ", text).strip()
 
@@ -2128,6 +2145,8 @@ class BotDouble:
         *args: object,
         prefix: Optional[str] = None,
     ) -> Optional[str]:
+        if not self._reserve_answer_slot(message):
+            return None
         try:
             result = await self._run_assistant_task(func, *args)
         except Exception as exc:
@@ -2149,6 +2168,8 @@ class BotDouble:
     async def _handle_imitation_for_user(
         self, message: Message, user_row: sqlite3.Row, chain: _ImitationChain
     ) -> None:
+        if not self._reserve_answer_slot(message):
+            return
         chat = message.chat
         if chat is None:
             return
