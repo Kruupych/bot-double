@@ -146,7 +146,7 @@ class StyleEngine:
             f"{peer_section}"
             f"{requester_section}"
             f"{self._gender_instruction(persona_gender)}"
-            f"Текст для ответа: {starter}\n\n"
+            f"{starter.strip()}\n\n"
             "Сформируй один ответ, как будто пишет сам пользователь."
             " Держи его тон, длину и структуру фраз."
             " Пиши строго от первого лица — используй 'я', 'мне', 'мой',"

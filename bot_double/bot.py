@@ -1957,12 +1957,10 @@ class BotDouble:
                 speaker = f"{chain.persona_name} (ты)"
             history_lines.append(f"{speaker}: {entry.text}")
         current = chain.messages[-1]
-        continuation_hint = (
-            " и продолжи цепочку" if history_lines else ""
-        )
+        continuation_hint = " и продолжи цепочку" if history_lines else ""
         current_line = (
-            f"{current.speaker} пишет тебе: \"{current.text}\". Ответь как"
-            f" {chain.persona_name} от первого лица{continuation_hint}."
+            f"{current.speaker} пишет тебе (боту, имитирующему человека): \"{current.text}\"."
+            f" Ответь как {chain.persona_name} от первого лица{continuation_hint}."
         )
         if history_lines:
             return "Контекст цепочки:\n" + "\n".join(history_lines) + "\n\n" + current_line
