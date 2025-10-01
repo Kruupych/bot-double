@@ -344,7 +344,7 @@ class Database:
                         last_analyzed_at,
                         analysis_summary,
                         analysis_details
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         chat_id,
