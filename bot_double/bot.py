@@ -79,6 +79,24 @@ class _BurstState:
     task: Optional[asyncio.Task] = None
 
 
+@dataclass
+class _ChainMessage:
+    speaker: str
+    text: str
+    is_persona: bool
+
+
+@dataclass
+class _ImitationChain:
+    chat_id: int
+    persona_id: int
+    persona_username: Optional[str]
+    persona_first_name: Optional[str]
+    persona_last_name: Optional[str]
+    persona_name: str
+    messages: List[_ChainMessage]
+
+
 _CYR_TO_LAT = {
     "а": "a",
     "б": "b",
@@ -161,7 +179,9 @@ class BotDouble:
         self._transcriber: Optional[SpeechTranscriber] = None
         self._assistant_tasks: Optional[AssistantTaskEngine] = None
         self._recent_imitation_targets: Dict[Tuple[int, int], int] = {}
-        self._imitation_reply_map: Dict[Tuple[int, int], int] = {}
+        self._chain_by_message: Dict[Tuple[int, int], _ImitationChain] = {}
+        self._last_chain_by_user: Dict[Tuple[int, int], _ImitationChain] = {}
+        self._chain_cache_limit = 500
         if self._settings.enable_voice_transcription:
             self._transcriber = SpeechTranscriber(
                 settings.openai_api_key,
@@ -237,78 +257,36 @@ class BotDouble:
 
         username = username_arg.lstrip("@")
         starter = " ".join(context.args[1:]).strip()
-        if not starter:
-            starter = "Просто продолжи разговор."  # fallback to keep prompt meaningful
 
         user_row = await self._run_db(self._db.get_user_by_username, username)
         if user_row is None:
             await message.reply_text(f"Я ещё не знаю пользователя @{username}.")
             return
-
-        message_count = await self._run_db(
-            self._db.get_message_count, chat.id, int(user_row["id"])
-        )
-        if message_count < self._settings.min_messages_for_profile:
-            await message.reply_text(
-                f"Пока не могу имитировать @{username}, мне нужно больше его сообщений для анализа"
-            )
-            return
-
-        samples = await self._collect_style_samples(
-            chat.id, int(user_row["id"]), topic_hint=starter
-        )
-        if not samples:
-            await message.reply_text(
-                f"Пока не могу имитировать @{username}, сообщений недостаточно."
-            )
-            return
-
-        persona_card = await self._get_persona_card(chat.id, int(user_row["id"]))
-        style_summary = None if persona_card else build_style_summary(samples)
-
         persona_name = display_name(
             user_row["username"], user_row["first_name"], user_row["last_name"]
         )
-        context_messages = await self._get_dialog_context(chat.id)
-        peer_profiles = await self._collect_peer_profiles(chat.id, int(user_row["id"]))
-        requester_profile = await self._collect_requester_profile(
-            chat.id, message.from_user, int(user_row["id"])
+        descriptor = f"@{username}"
+        instruction_source = starter or message.text or ""
+        user_text = self._prepare_chain_user_text(
+            instruction=instruction_source,
+            payload=starter or None,
+            descriptor=descriptor,
+            persona_row=user_row,
+            persona_name=persona_name,
+            message=message,
         )
-        persona_gender = guess_gender(
-            user_row["first_name"], user_row["username"]
-        )
-        addressee_internal_id = await self._ensure_internal_user(message.from_user)
-        addressee_name = display_name(
-            message.from_user.username,
-            message.from_user.first_name,
-            message.from_user.last_name,
-        )
-        relationship_hint = await self._relationship_hint_for_addressee(
-            chat.id,
-            int(user_row["id"]),
-            addressee_internal_id,
-            addressee_name,
-        )
-        try:
-            ai_reply = await self._generate_reply(
-                username,
-            persona_name,
-            samples,
-            starter,
-            context_messages,
-            peer_profiles,
-            requester_profile,
-            persona_gender,
-            style_summary,
-            persona_card,
-            relationship_hint,
-        )
-        except Exception as exc:  # pragma: no cover - network errors etc.
-            LOGGER.exception("Failed to generate imitation", exc_info=exc)
-            await message.reply_text("Не удалось получить ответ от модели, попробуйте позже")
+        if not user_text:
+            await message.reply_text(
+                "Нужен текст для имитации — добавьте подсказку после команды."
+            )
             return
-
-        await message.reply_text(ai_reply)
+        chain = self._create_chain(
+            chat.id,
+            user_row,
+            message.from_user,
+            user_text,
+        )
+        await self._handle_imitation_for_user(message, user_row, chain)
 
     async def imitate_profiles(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
@@ -513,7 +491,28 @@ class BotDouble:
 
         # Use message text without mentions as starter
         starter = self._strip_mentions(message.text or "", mention_usernames)
-        await self._handle_imitation_for_user(message, user_row, starter)
+        persona_name = display_name(
+            user_row["username"],
+            user_row["first_name"],
+            user_row["last_name"],
+        )
+        user_text = self._prepare_chain_user_text(
+            instruction=starter,
+            payload=starter,
+            descriptor=None,
+            persona_row=user_row,
+            persona_name=persona_name,
+            message=message,
+        )
+        if not user_text:
+            user_text = "Продолжи разговор."
+        chain = self._create_chain(
+            chat.id,
+            user_row,
+            message.from_user,
+            user_text,
+        )
+        await self._handle_imitation_for_user(message, user_row, chain)
 
     async def on_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
@@ -1225,23 +1224,35 @@ class BotDouble:
             and self._bot_id is not None
             and message.reply_to_message.from_user.id == self._bot_id
         )
-        if reply_to_bot and message.reply_to_message:
-            key = (message.chat_id or 0, message.reply_to_message.message_id)
-            mapped_target = self._imitation_reply_map.get(key)
-            if (
-                mapped_target
-                and message.chat_id is not None
-                and message.from_user is not None
-            ):
+        reply_chain: Optional[_ImitationChain] = None
+        if (
+            reply_to_bot
+            and message.reply_to_message
+            and message.chat_id is not None
+        ):
+            reply_chain = self._chain_by_message.get(
+                (message.chat_id, message.reply_to_message.message_id)
+            )
+            if reply_chain and message.from_user is not None:
                 self._recent_imitation_targets[
                     (message.chat_id, message.from_user.id)
-                ] = mapped_target
+                ] = reply_chain.persona_id
 
         cleaned_instruction = self._strip_call_signs(stripped)
         cleaned_lower = cleaned_instruction.lower()
-
+        continuation_chain: Optional[_ImitationChain] = reply_chain
+        if (
+            continuation_chain is None
+            and message.chat_id is not None
+            and message.from_user is not None
+        ):
+            continuation_chain = self._last_chain_by_user.get(
+                (message.chat_id, message.from_user.id)
+            )
         followup_target_id: Optional[int] = None
-        if message.chat_id is not None and message.from_user is not None:
+        if continuation_chain is not None:
+            followup_target_id = continuation_chain.persona_id
+        elif message.chat_id is not None and message.from_user is not None:
             followup_target_id = self._recent_imitation_targets.get(
                 (message.chat_id, message.from_user.id)
             )
@@ -1295,28 +1306,49 @@ class BotDouble:
                     "Нужен текст для имитации — добавьте подсказку или ответьте на сообщение."
                 )
                 return True
-            starter = self._build_imitation_starter(
-                base_payload=payload,
+            persona_name = display_name(
+                resolved_row["username"],
+                resolved_row["first_name"],
+                resolved_row["last_name"],
+            )
+            user_text = self._prepare_chain_user_text(
                 instruction=cleaned_instruction or stripped,
+                payload=payload,
                 descriptor=descriptor,
                 persona_row=resolved_row,
+                persona_name=persona_name,
                 message=message,
             )
+            if not user_text:
+                await message.reply_text(
+                    "Нужен текст для имитации — добавьте подсказку или ответьте на сообщение."
+                )
+                return True
+            chat_id = message.chat_id
+            if chat_id is None:
+                return True
+            chain = self._create_chain(
+                chat_id,
+                resolved_row,
+                message.from_user,
+                user_text,
+            )
             await self._handle_imitation_for_user(
-                message, resolved_row, starter
+                message, resolved_row, chain
             )
             return True
 
         if (
-            followup_target_id is not None
+            continuation_chain is not None
             and not self._should_skip_chain(cleaned_lower)
             and await self._handle_followup_imitation(
                 message,
                 cleaned_instruction,
                 cleaned_lower,
                 stripped,
-                followup_target_id,
+                continuation_chain,
                 reply_to_bot,
+                followup_target_id,
             )
         ):
             return True
@@ -1527,15 +1559,31 @@ class BotDouble:
         )
         if resolved_row is None:
             return False
-        base_payload = remainder or self._extract_payload(message, cleaned_instruction)
-        starter = self._build_imitation_starter(
-            base_payload=base_payload,
+        payload = remainder or self._extract_payload(
+            message, cleaned_instruction
+        )
+        persona_name = display_name(
+            resolved_row["username"],
+            resolved_row["first_name"],
+            resolved_row["last_name"],
+        )
+        user_text = self._prepare_chain_user_text(
             instruction=cleaned_instruction or stripped,
+            payload=payload,
             descriptor=descriptor,
             persona_row=resolved_row,
+            persona_name=persona_name,
             message=message,
         )
-        await self._handle_imitation_for_user(message, resolved_row, starter)
+        if not user_text:
+            return False
+        chain = self._create_chain(
+            chat.id,
+            resolved_row,
+            message.from_user,
+            user_text,
+        )
+        await self._handle_imitation_for_user(message, resolved_row, chain)
         return True
 
     async def _handle_followup_imitation(
@@ -1544,17 +1592,42 @@ class BotDouble:
         cleaned_instruction: str,
         cleaned_lower: str,
         stripped: str,
-        target_internal_id: int,
+        base_chain: Optional[_ImitationChain],
         reply_to_bot: bool,
+        fallback_persona_id: Optional[int],
     ) -> bool:
-        row = await self._run_db(self._db.get_user_by_id, target_internal_id)
-        if row is None:
-            if message.chat_id is not None and message.from_user is not None:
-                self._recent_imitation_targets.pop(
-                    (message.chat_id, message.from_user.id), None
-                )
+        chain_source = base_chain
+        persona_row: Optional[sqlite3.Row] = None
+        if chain_source is not None:
+            persona_row = await self._run_db(
+                self._db.get_user_by_id, chain_source.persona_id
+            )
+            if persona_row is None:
+                return False
+        elif fallback_persona_id is not None:
+            persona_row = await self._run_db(
+                self._db.get_user_by_id, fallback_persona_id
+            )
+            if persona_row is None or message.chat_id is None:
+                return False
+            persona_name = display_name(
+                persona_row["username"],
+                persona_row["first_name"],
+                persona_row["last_name"],
+            )
+            chain_source = _ImitationChain(
+                chat_id=message.chat_id,
+                persona_id=int(persona_row["id"]),
+                persona_username=persona_row["username"],
+                persona_first_name=persona_row["first_name"],
+                persona_last_name=persona_row["last_name"],
+                persona_name=persona_name,
+                messages=[],
+            )
+        else:
             return False
 
+        persona_name = chain_source.persona_name
         followup_markers = (
             "соглас",
             "подроб",
@@ -1576,21 +1649,19 @@ class BotDouble:
             cleaned_instruction,
             keywords=["имитируй", "ответ", "скажи", "соглас"],
         )
-        if not payload:
-            payload = self._extract_reply_text(message)
-        if not payload:
-            payload = stripped
-        if not payload or len(payload) < 3:
-            return False
-
-        starter = self._build_imitation_starter(
-            base_payload=payload,
-            instruction=cleaned_instruction or stripped,
+        user_text = self._prepare_chain_user_text(
+            instruction=cleaned_instruction,
+            payload=payload,
             descriptor=None,
-            persona_row=row,
+            persona_row=persona_row,
+            persona_name=persona_name,
             message=message,
         )
-        await self._handle_imitation_for_user(message, row, starter)
+        if not user_text:
+            return False
+
+        chain = self._branch_chain(chain_source, message.from_user, user_text)
+        await self._handle_imitation_for_user(message, persona_row, chain)
         return True
 
     def _is_direct_address(self, message: Message, lowered_text: str) -> bool:
@@ -1679,42 +1750,6 @@ class BotDouble:
         if match:
             return match.group(1).strip()
         return None
-
-    def _build_imitation_starter(
-        self,
-        *,
-        base_payload: Optional[str],
-        instruction: Optional[str],
-        descriptor: Optional[str],
-        persona_row: sqlite3.Row,
-        message: Message,
-    ) -> str:
-        persona_name = display_name(
-            persona_row["username"],
-            persona_row["first_name"],
-            persona_row["last_name"],
-        )
-        cleaned_instruction = self._clean_imitation_instruction(
-            instruction, descriptor, persona_row, persona_name
-        )
-        payload_variants: List[str] = []
-        cleaned_payload = self._clean_imitation_payload(
-            base_payload, persona_row, persona_name
-        )
-        reply_text = self._clean_imitation_payload(
-            self._extract_reply_text(message), persona_row, persona_name
-        )
-        if cleaned_payload:
-            payload_variants.append(f"Подсказка: {cleaned_payload}")
-        if reply_text and reply_text != cleaned_payload:
-            payload_variants.append(f"Предыдущий ответ: {reply_text}")
-        parts: List[str] = []
-        if cleaned_instruction:
-            parts.append(f"Инструкция: {cleaned_instruction}")
-        parts.extend(payload_variants)
-        if not parts:
-            return "Продолжи диалог."
-        return "\n".join(parts)
 
     def _clean_imitation_instruction(
         self,
@@ -1810,6 +1845,173 @@ class BotDouble:
         text = re.sub(r"\s{2,}", " ", text)
         return text.strip(" ,:-")
 
+    def _clone_chain(self, chain: _ImitationChain) -> _ImitationChain:
+        return _ImitationChain(
+            chat_id=chain.chat_id,
+            persona_id=chain.persona_id,
+            persona_username=chain.persona_username,
+            persona_first_name=chain.persona_first_name,
+            persona_last_name=chain.persona_last_name,
+            persona_name=chain.persona_name,
+            messages=[
+                _ChainMessage(
+                    speaker=msg.speaker,
+                    text=msg.text,
+                    is_persona=msg.is_persona,
+                )
+                for msg in chain.messages
+            ],
+        )
+
+    def _register_chain_reference(
+        self, chat_id: int, message_id: int, chain: _ImitationChain
+    ) -> None:
+        key = (chat_id, message_id)
+        self._chain_by_message[key] = self._clone_chain(chain)
+        if len(self._chain_by_message) > self._chain_cache_limit:
+            oldest_key = next(iter(self._chain_by_message))
+            if oldest_key != key:
+                self._chain_by_message.pop(oldest_key, None)
+
+    def _remember_chain_for_user(
+        self, chat_id: int, user_id: int, chain: _ImitationChain
+    ) -> None:
+        key = (chat_id, user_id)
+        self._last_chain_by_user[key] = self._clone_chain(chain)
+        if len(self._last_chain_by_user) > self._chain_cache_limit:
+            oldest_key = next(iter(self._last_chain_by_user))
+            if oldest_key != key:
+                self._last_chain_by_user.pop(oldest_key, None)
+
+    def _normalize_chain_text(self, text: str) -> str:
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _prepare_chain_user_text(
+        self,
+        *,
+        instruction: Optional[str],
+        payload: Optional[str],
+        descriptor: Optional[str],
+        persona_row: sqlite3.Row,
+        persona_name: str,
+        message: Message,
+    ) -> Optional[str]:
+        candidates: List[str] = []
+        if instruction:
+            cleaned_instruction = self._clean_imitation_instruction(
+                instruction, descriptor, persona_row, persona_name
+            )
+            if cleaned_instruction:
+                candidates.append(cleaned_instruction)
+        if payload:
+            cleaned_payload = self._clean_imitation_payload(
+                payload, persona_row, persona_name
+            )
+            if cleaned_payload:
+                candidates.append(cleaned_payload)
+        original = message.text or message.caption or ""
+        if original:
+            stripped_original = self._strip_call_signs(original)
+            stripped_original = self._remove_descriptor_mentions(
+                stripped_original, descriptor, persona_row, persona_name
+            )
+            stripped_original = stripped_original.strip()
+            if stripped_original:
+                candidates.append(stripped_original)
+        unique: List[str] = []
+        for candidate in candidates:
+            normalized = self._normalize_chain_text(candidate)
+            if not normalized:
+                continue
+            if normalized.startswith("/"):
+                continue
+            if normalized not in unique:
+                unique.append(normalized)
+        if unique:
+            return "\n".join(unique)
+        return None
+
+    def _format_chain_prompt(self, chain: _ImitationChain) -> str:
+        if not chain.messages:
+            return (
+                "Участник задаёт вопрос. Ответь в стиле выбранного пользователя и"
+                " поддержи диалог."
+            )
+        history_lines: List[str] = []
+        for entry in chain.messages[:-1]:
+            speaker = chain.persona_name if entry.is_persona else entry.speaker
+            if entry.is_persona:
+                speaker = f"{chain.persona_name} (ты)"
+            history_lines.append(f"{speaker}: {entry.text}")
+        current = chain.messages[-1]
+        current_line = (
+            f"{current.speaker} пишет тебе: \"{current.text}\". Ответь как"
+            f" {chain.persona_name} от первого лица и продолжи цепочку."
+        )
+        if history_lines:
+            return "Контекст цепочки:\n" + "\n".join(history_lines) + "\n\n" + current_line
+        return current_line
+
+    def _create_chain(
+        self,
+        chat_id: int,
+        persona_row: sqlite3.Row,
+        requester: Optional[User],
+        user_text: str,
+    ) -> _ImitationChain:
+        persona_name = display_name(
+            persona_row["username"],
+            persona_row["first_name"],
+            persona_row["last_name"],
+        )
+        chain = _ImitationChain(
+            chat_id=chat_id,
+            persona_id=int(persona_row["id"]),
+            persona_username=persona_row["username"],
+            persona_first_name=persona_row["first_name"],
+            persona_last_name=persona_row["last_name"],
+            persona_name=persona_name,
+            messages=[],
+        )
+        requester_name = "Собеседник"
+        if requester is not None:
+            requester_name = display_name(
+                requester.username, requester.first_name, requester.last_name
+            )
+        normalized = self._normalize_chain_text(user_text)
+        if normalized:
+            chain.messages.append(
+                _ChainMessage(
+                    speaker=requester_name,
+                    text=normalized,
+                    is_persona=False,
+                )
+            )
+        return chain
+
+    def _branch_chain(
+        self,
+        base_chain: _ImitationChain,
+        requester: Optional[User],
+        user_text: str,
+    ) -> _ImitationChain:
+        chain = self._clone_chain(base_chain)
+        requester_name = "Собеседник"
+        if requester is not None:
+            requester_name = display_name(
+                requester.username, requester.first_name, requester.last_name
+            )
+        normalized = self._normalize_chain_text(user_text)
+        if normalized:
+            chain.messages.append(
+                _ChainMessage(
+                    speaker=requester_name,
+                    text=normalized,
+                    is_persona=False,
+                )
+            )
+        return chain
+
     def _should_skip_chain(self, cleaned_lower: str) -> bool:
         control_tokens = (
             "имитируй",
@@ -1880,7 +2082,7 @@ class BotDouble:
         return text
 
     async def _handle_imitation_for_user(
-        self, message: Message, user_row: sqlite3.Row, starter: str
+        self, message: Message, user_row: sqlite3.Row, chain: _ImitationChain
     ) -> None:
         chat = message.chat
         if chat is None:
@@ -1897,8 +2099,9 @@ class BotDouble:
                 f"Мне нужно больше сообщений {display}, чтобы имитировать его стиль."
             )
             return
+        topic_hint = chain.messages[-1].text if chain.messages else ""
         samples = await self._collect_style_samples(
-            chat.id, user_id, topic_hint=starter
+            chat.id, user_id, topic_hint=topic_hint
         )
         if not samples:
             await message.reply_text(
@@ -1907,10 +2110,8 @@ class BotDouble:
             return
         persona_card = await self._get_persona_card(chat.id, user_id)
         style_summary = None if persona_card else build_style_summary(samples)
-        persona_name = display_name(
-            user_row["username"], user_row["first_name"], user_row["last_name"]
-        )
-        context_messages = await self._get_dialog_context(chat.id)
+        persona_name = chain.persona_name
+        context_messages = None
         peer_profiles = await self._collect_peer_profiles(chat.id, user_id)
         requester_profile = await self._collect_requester_profile(
             chat.id, message.from_user, user_id
@@ -1930,6 +2131,7 @@ class BotDouble:
             addressee_internal_id,
             addressee_name,
         )
+        starter = self._format_chain_prompt(chain)
         try:
             reply_text = await self._generate_reply(
                 user_row["username"] or "",
@@ -1950,6 +2152,15 @@ class BotDouble:
                 "Не удалось сгенерировать ответ. Попробуйте позже или уточните подсказку."
             )
             return
+        normalized_reply = self._normalize_chain_text(reply_text)
+        if normalized_reply:
+            chain.messages.append(
+                _ChainMessage(
+                    speaker=chain.persona_name,
+                    text=normalized_reply,
+                    is_persona=True,
+                )
+            )
         bot_reply = await message.reply_text(reply_text)
         persona_id = int(user_row["id"])
         if message.chat_id is not None and message.from_user is not None:
@@ -1957,13 +2168,9 @@ class BotDouble:
                 (message.chat_id, message.from_user.id)
             ] = persona_id
         if message.chat_id is not None and bot_reply is not None:
-            key = (message.chat_id, bot_reply.message_id)
-            self._imitation_reply_map[key] = persona_id
-            if len(self._imitation_reply_map) > 500:
-                # keep map bounded to avoid unbounded growth
-                oldest_key = next(iter(self._imitation_reply_map))
-                if oldest_key != key:
-                    self._imitation_reply_map.pop(oldest_key, None)
+            self._register_chain_reference(message.chat_id, bot_reply.message_id, chain)
+        if message.chat_id is not None and message.from_user is not None:
+            self._remember_chain_for_user(message.chat_id, message.from_user.id, chain)
 
     async def _ensure_internal_user(self, user: Optional[User]) -> Optional[int]:
         if user is None:
