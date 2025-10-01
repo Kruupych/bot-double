@@ -846,6 +846,7 @@ class BotDouble:
         if context_snippet and should_store_context_snippet(
             context_snippet, min_tokens=self._settings.min_tokens_to_store
         ):
+            context_snippet = self._truncate_for_storage(context_snippet)
             await self._run_db(
                 self._db.store_message,
                 message.chat_id,
@@ -910,6 +911,9 @@ class BotDouble:
 
         signals = evaluate_interaction(stripped)
         sample_text = stripped if signals.has_any() else None
+        if sample_text:
+            sample_text = self._truncate_for_storage(sample_text)
+        full_text = self._truncate_for_storage(stripped)
         timestamp = int(message.date.timestamp())
 
         for target_id in targets:
@@ -924,7 +928,7 @@ class BotDouble:
                 formal=signals.formal,
                 teasing=signals.teasing,
                 sample_text=sample_text,
-                full_text=stripped,
+                full_text=full_text,
                 timestamp=timestamp,
             )
             await self._maybe_queue_relationship_analysis(
@@ -2113,6 +2117,15 @@ class BotDouble:
         )
         return any(token in cleaned_lower for token in control_tokens)
 
+    def _truncate_for_storage(self, text: str) -> str:
+        try:
+            limit = int(self._settings.max_store_chars)
+        except Exception:
+            limit = 0
+        if limit and limit > 0 and len(text) > limit:
+            return (text[:limit]).rstrip() + "\u2026"
+        return text
+
     def _parse_language(self, lowered_text: str) -> str:
         language_hints = {
             "англ": "английский",
@@ -2535,7 +2548,7 @@ class BotDouble:
             combined_text, min_tokens=self._settings.min_tokens_to_store
         ):
             return
-
+        combined_text = self._truncate_for_storage(combined_text)
         await self._run_db(
             self._db.store_message,
             burst.chat_id,
