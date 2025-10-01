@@ -184,6 +184,7 @@ class BotDouble:
         self._chain_cache_limit = 500
         self._answered_messages: Dict[Tuple[int, int], int] = {}
         self._answered_cache_limit = 1000
+        self._burst_watchdog_task: Optional[asyncio.Task] = None
         if self._settings.enable_voice_transcription:
             self._transcriber = SpeechTranscriber(
                 settings.openai_api_key,
@@ -232,10 +233,20 @@ class BotDouble:
             self._persona_queue = asyncio.Queue()
         if self._persona_analyzer is not None and self._persona_worker is None:
             self._persona_worker = asyncio.create_task(self._persona_analysis_worker())
+        # Start a watchdog to flush stale bursts in case timers are cancelled
+        if self._settings.enable_bursts and self._burst_watchdog_task is None:
+            self._burst_watchdog_task = asyncio.create_task(self._burst_watchdog())
 
     async def _post_shutdown(self, application: Application) -> None:
         LOGGER.info("Bot shutting down")
         await self._flush_all_buffers()
+        if self._burst_watchdog_task is not None:
+            self._burst_watchdog_task.cancel()
+            try:
+                await self._burst_watchdog_task
+            except asyncio.CancelledError:
+                pass
+            self._burst_watchdog_task = None
         await self._stop_analysis_worker()
         await self._stop_persona_worker()
         self._db.close()
@@ -2770,6 +2781,30 @@ class BotDouble:
                     to_flush.append(key)
         for key in to_flush:
             await self._flush_buffer_for_key(key)
+
+    async def _burst_watchdog(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(5)
+                if not self._settings.enable_bursts:
+                    continue
+                now = int(time.time())
+                keys_to_flush: list[tuple[int, int]] = []
+                inactivity = max(self._settings.burst_inactivity_seconds, 5)
+                max_age = max(self._settings.burst_max_duration_seconds, 0)
+                async with self._buffer_lock:
+                    for key, burst in self._burst_states.items():
+                        if not burst.texts:
+                            continue
+                        if now - burst.last_timestamp >= inactivity * 2:
+                            keys_to_flush.append(key)
+                            continue
+                        if max_age > 0 and (now - burst.start_timestamp) > max_age + inactivity:
+                            keys_to_flush.append(key)
+                for key in keys_to_flush:
+                    await self._flush_buffer_for_key(key)
+        except asyncio.CancelledError:
+            return
 
     async def _generate_reply(
         self,
