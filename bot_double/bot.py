@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import random
@@ -41,6 +42,7 @@ from .relationship_analysis import (
 from .social_analysis import InteractionExcerpt, SocialAnalyzer
 from .persona_analysis import PersonaAnalyzer, PersonaSample
 from .style_analysis import build_style_summary
+from .transcription import SpeechTranscriber
 from .utils import (
     display_name,
     guess_gender,
@@ -112,6 +114,13 @@ class BotDouble:
         self._persona_queue: Optional[asyncio.Queue[Tuple[int, int]]] = None
         self._persona_inflight: Set[Tuple[int, int]] = set()
         self._persona_worker: Optional[asyncio.Task] = None
+        self._transcriber: Optional[SpeechTranscriber] = None
+        if self._settings.enable_voice_transcription:
+            self._transcriber = SpeechTranscriber(
+                settings.openai_api_key,
+                settings.voice_transcription_model,
+                language=settings.voice_transcription_language,
+            )
 
     def build_application(self) -> Application:
         return (
@@ -622,9 +631,6 @@ class BotDouble:
         if message.from_user is None:
             return
         user = message.from_user
-        text = message.text or ""
-        if not text:
-            return
         if user.is_bot:
             if self._bot_id is None or user.id != self._bot_id:
                 return
@@ -647,15 +653,42 @@ class BotDouble:
         timestamp = int(message.date.timestamp())
         key = (chat_id, user_id)
 
-        should_store = should_store_message(
-            message,
-            min_tokens=self._settings.min_tokens_to_store,
-            allowed_bot_id=self._bot_id,
-        )
-        bufferable = is_bufferable_message(
-            message,
-            allowed_bot_id=self._bot_id,
-        )
+        text_source_voice = False
+        text = message.text or ""
+        if not text and self._settings.enable_voice_transcription:
+            text = await self._maybe_transcribe_voice_message(message)
+            if text:
+                text_source_voice = True
+        if not text:
+            return
+        text = text.strip()
+        if not text:
+            return
+
+        if text_source_voice:
+            if text.startswith(('/', '!', '.')):
+                await self._flush_buffer_for_key(key)
+                self._record_chat_event(message, timestamp)
+                return
+            should_store = should_store_context_snippet(
+                text, min_tokens=self._settings.min_tokens_to_store
+            )
+            lowered = text.lower()
+            bufferable = (
+                not should_store
+                and "http://" not in lowered
+                and "https://" not in lowered
+            )
+        else:
+            should_store = should_store_message(
+                message,
+                min_tokens=self._settings.min_tokens_to_store,
+                allowed_bot_id=self._bot_id,
+            )
+            bufferable = is_bufferable_message(
+                message,
+                allowed_bot_id=self._bot_id,
+            )
 
         if should_store or bufferable:
             await self._append_to_burst(
@@ -1166,6 +1199,51 @@ class BotDouble:
             events = deque(maxlen=self._chat_events_maxlen)
             self._chat_events[chat_id] = events
         events.append(event)
+
+    async def _maybe_transcribe_voice_message(self, message: Message) -> Optional[str]:
+        if self._transcriber is None:
+            return None
+        voice = message.voice
+        if voice is None:
+            return None
+        if (
+            self._settings.voice_transcription_max_duration > 0
+            and voice.duration > self._settings.voice_transcription_max_duration
+        ):
+            LOGGER.info(
+                "Skipping transcription: voice message too long (%ss)", voice.duration
+            )
+            return None
+        try:
+            file = await message.get_file()
+            buffer = io.BytesIO()
+            await file.download_to_memory(out=buffer)
+        except Exception:
+            LOGGER.exception("Failed to download voice message for transcription")
+            return None
+
+        audio_bytes = buffer.getvalue()
+        if not audio_bytes:
+            return None
+        filename = f"voice_{voice.file_unique_id or voice.file_id}.ogg"
+        loop = asyncio.get_running_loop()
+        try:
+            text = await loop.run_in_executor(
+                None,
+                partial(
+                    self._transcriber.transcribe,
+                    audio_bytes,
+                    filename,
+                    voice.mime_type,
+                    language=self._settings.voice_transcription_language,
+                ),
+            )
+        except Exception:
+            LOGGER.exception("Failed to transcribe voice message")
+            return None
+        if text:
+            LOGGER.debug("Voice transcription succeeded: %s", text)
+        return text
 
     async def _flush_all_buffers(self) -> None:
         async with self._buffer_lock:

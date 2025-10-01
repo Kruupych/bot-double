@@ -34,6 +34,10 @@ class Settings:
     burst_max_chars: int = 2000
     turn_window_seconds: int = 10
     enable_bursts: bool = True
+    enable_voice_transcription: bool = False
+    voice_transcription_model: str = "gpt-4o-mini-transcribe"
+    voice_transcription_language: Optional[str] = "ru"
+    voice_transcription_max_duration: int = 180
     relationship_analysis_model: Optional[str] = None
     relationship_analysis_min_pending: int = 5
     relationship_analysis_min_hours: int = 24
@@ -135,6 +139,16 @@ def load_settings() -> Settings:
     burst_max_chars = _get_env_int("BURST_MAX_CHARS", 2000, minimum=0)
     turn_window_seconds = _get_env_int("TURN_WINDOW_SECONDS", 10, minimum=1)
     enable_bursts = _get_env_bool("ENABLE_BURSTS", True)
+    enable_voice_transcription = _get_env_bool("ENABLE_VOICE_TRANSCRIPTION", False)
+    voice_transcription_model = os.getenv(
+        "VOICE_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe"
+    )
+    voice_transcription_language = os.getenv("VOICE_TRANSCRIPTION_LANGUAGE", "ru")
+    if voice_transcription_language == "":
+        voice_transcription_language = None
+    voice_transcription_max_duration = _get_env_int(
+        "VOICE_TRANSCRIPTION_MAX_DURATION", 180, minimum=0
+    )
     rel_model = os.getenv("RELATIONSHIP_ANALYSIS_MODEL")
     rel_min_pending = _get_env_int("RELATIONSHIP_ANALYSIS_MIN_PENDING", 5, minimum=1)
     rel_min_hours = _get_env_int("RELATIONSHIP_ANALYSIS_MIN_HOURS", 24, minimum=0)
@@ -179,6 +193,10 @@ def load_settings() -> Settings:
         burst_max_chars=burst_max_chars,
         turn_window_seconds=turn_window_seconds,
         enable_bursts=enable_bursts,
+        enable_voice_transcription=enable_voice_transcription,
+        voice_transcription_model=voice_transcription_model,
+        voice_transcription_language=voice_transcription_language,
+        voice_transcription_max_duration=voice_transcription_max_duration,
         relationship_analysis_model=rel_model,
         relationship_analysis_min_pending=rel_min_pending,
         relationship_analysis_min_hours=rel_min_hours,
