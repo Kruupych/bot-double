@@ -1163,8 +1163,15 @@ class BotDouble:
             return descriptor, payload
         like_match = re.search(r"как\s+([^,.;\n]+)", instruction, re.IGNORECASE)
         if like_match:
-            descriptor = like_match.group(1).strip()
-            return descriptor, instruction.strip()
+            descriptor_raw = like_match.group(1).strip()
+            descriptor_tokens = descriptor_raw.split()
+            descriptor = descriptor_tokens[0] if descriptor_tokens else descriptor_raw
+            payload = (
+                (instruction[: like_match.start()].strip())
+                + " "
+                + instruction[like_match.end() :].strip()
+            ).strip()
+            return descriptor, (payload or None)
         return None
 
     def _split_imitation_remainder(
@@ -1270,8 +1277,15 @@ class BotDouble:
                     "Нужен текст для имитации — добавьте подсказку или ответьте на сообщение."
                 )
                 return True
+            starter = self._build_imitation_starter(
+                base_payload=payload,
+                instruction=cleaned_instruction or stripped,
+                descriptor=descriptor,
+                persona_row=resolved_row,
+                message=message,
+            )
             await self._handle_imitation_for_user(
-                message, resolved_row, payload.strip()
+                message, resolved_row, starter
             )
             return True
 
@@ -1480,8 +1494,15 @@ class BotDouble:
                         and len(payload) >= 3
                         and (reply_to_bot or any(marker in cleaned_lower for marker in followup_markers))
                     ):
+                        starter = self._build_imitation_starter(
+                            base_payload=payload,
+                            instruction=cleaned_instruction or stripped,
+                            descriptor=None,
+                            persona_row=row,
+                            message=message,
+                        )
                         await self._handle_imitation_for_user(
-                            message, row, payload.strip()
+                            message, row, starter
                         )
                         return True
 
@@ -1580,6 +1601,120 @@ class BotDouble:
         if match:
             return match.group(1).strip()
         return None
+
+    def _build_imitation_starter(
+        self,
+        *,
+        base_payload: Optional[str],
+        instruction: Optional[str],
+        descriptor: Optional[str],
+        persona_row: sqlite3.Row,
+        message: Message,
+    ) -> str:
+        persona_name = display_name(
+            persona_row["username"],
+            persona_row["first_name"],
+            persona_row["last_name"],
+        )
+        cleaned_instruction = self._clean_imitation_instruction(
+            instruction, descriptor, persona_row, persona_name
+        )
+        payload_variants: List[str] = []
+        cleaned_payload = self._clean_imitation_payload(
+            base_payload, persona_row, persona_name
+        )
+        reply_text = self._clean_imitation_payload(
+            self._extract_reply_text(message), persona_row, persona_name
+        )
+        if cleaned_payload:
+            payload_variants.append(f"Подсказка: {cleaned_payload}")
+        if reply_text and reply_text != cleaned_payload:
+            payload_variants.append(f"Предыдущий ответ: {reply_text}")
+        parts: List[str] = []
+        if cleaned_instruction:
+            parts.append(f"Инструкция: {cleaned_instruction}")
+        parts.extend(payload_variants)
+        if not parts:
+            return "Продолжи диалог."
+        return "\n".join(parts)
+
+    def _clean_imitation_instruction(
+        self,
+        instruction: Optional[str],
+        descriptor: Optional[str],
+        persona_row: sqlite3.Row,
+        persona_name: str,
+    ) -> Optional[str]:
+        if not instruction:
+            return None
+        text = self._strip_call_signs(instruction).strip()
+        text = self._strip_command_prefix(text)
+        text = self._remove_descriptor_mentions(text, descriptor, persona_row, persona_name)
+        return text or None
+
+    def _clean_imitation_payload(
+        self,
+        payload: Optional[str],
+        persona_row: sqlite3.Row,
+        persona_name: str,
+    ) -> Optional[str]:
+        if not payload:
+            return None
+        text = self._strip_call_signs(payload).strip()
+        text = self._remove_descriptor_mentions(text, None, persona_row, persona_name)
+        return text or None
+
+    def _strip_command_prefix(self, text: str) -> str:
+        lowered = text.lower()
+        prefixes = (
+            "имитируй",
+            "ответь",
+            "расскажи",
+            "скажи",
+            "напиши",
+            "сформулируй",
+            "подскажи",
+            "опиши",
+        )
+        for prefix in prefixes:
+            if lowered.startswith(prefix):
+                remainder = text[len(prefix) :].lstrip(" ,:-")
+                return remainder or text
+        return text
+
+    def _remove_descriptor_mentions(
+        self,
+        text: str,
+        descriptor: Optional[str],
+        persona_row: sqlite3.Row,
+        persona_name: str,
+    ) -> str:
+        tokens: Set[str] = set()
+        if descriptor:
+            tokens.add(descriptor)
+            plain_descriptor = descriptor.replace("@", "").strip()
+            if plain_descriptor:
+                tokens.add(plain_descriptor)
+        if persona_name:
+            tokens.add(persona_name)
+            tokens.update(persona_name.split())
+        first_name = (persona_row["first_name"] or "").strip()
+        if first_name:
+            tokens.add(first_name)
+        username = persona_row["username"]
+        if username:
+            tokens.add(username)
+            tokens.add(f"@{username}")
+
+        for token in sorted(tokens, key=len, reverse=True):
+            if not token:
+                continue
+            pattern_call = rf"(?i)\bкак\s+{re.escape(token)}\b"
+            text = re.sub(pattern_call, "", text)
+            pattern_leading = rf"(?i)^\s*{re.escape(token)}([\s,.:;!?\-—]+)"
+            text = re.sub(pattern_leading, "", text)
+        text = re.sub(r"\s{2,}", " ", text)
+        return text.strip(" ,:-")
 
     def _parse_language(self, lowered_text: str) -> str:
         language_hints = {
