@@ -587,11 +587,17 @@ class BotDouble:
         name_token = (self._bot_name or "").lower()
         if name_token and name_token in lowered_text:
             return True
-        if lowered_text.startswith("двойник") or lowered_text.startswith("бот" + " "):
+        if lowered_text.startswith("двойник"):
+            return True
+        if lowered_text.startswith("бот"):
+            if len(lowered_text) == 3:
+                return True
+            next_char = lowered_text[3]
+            if next_char in {" ", ",", ":", ";", "-", "—", "!", "?", "."}:
+                return True
+        if "бот-двойник" in lowered_text:
             return True
         if "двойник" in lowered_text:
-            return True
-        if "бот-двойник" in lowered_text:
             return True
         return False
 
