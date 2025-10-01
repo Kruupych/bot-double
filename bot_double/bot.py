@@ -161,6 +161,7 @@ class BotDouble:
         self._transcriber: Optional[SpeechTranscriber] = None
         self._assistant_tasks: Optional[AssistantTaskEngine] = None
         self._recent_imitation_targets: Dict[Tuple[int, int], int] = {}
+        self._imitation_reply_map: Dict[Tuple[int, int], int] = {}
         if self._settings.enable_voice_transcription:
             self._transcriber = SpeechTranscriber(
                 settings.openai_api_key,
@@ -1224,6 +1225,17 @@ class BotDouble:
             and self._bot_id is not None
             and message.reply_to_message.from_user.id == self._bot_id
         )
+        if reply_to_bot and message.reply_to_message:
+            key = (message.chat_id or 0, message.reply_to_message.message_id)
+            mapped_target = self._imitation_reply_map.get(key)
+            if (
+                mapped_target
+                and message.chat_id is not None
+                and message.from_user is not None
+            ):
+                self._recent_imitation_targets[
+                    (message.chat_id, message.from_user.id)
+                ] = mapped_target
 
         cleaned_instruction = self._strip_call_signs(stripped)
         cleaned_lower = cleaned_instruction.lower()
@@ -1892,11 +1904,20 @@ class BotDouble:
                 "Не удалось сгенерировать ответ. Попробуйте позже или уточните подсказку."
             )
             return
-        await message.reply_text(reply_text)
+        bot_reply = await message.reply_text(reply_text)
+        persona_id = int(user_row["id"])
         if message.chat_id is not None and message.from_user is not None:
             self._recent_imitation_targets[
                 (message.chat_id, message.from_user.id)
-            ] = int(user_row["id"])
+            ] = persona_id
+        if message.chat_id is not None and bot_reply is not None:
+            key = (message.chat_id, bot_reply.message_id)
+            self._imitation_reply_map[key] = persona_id
+            if len(self._imitation_reply_map) > 500:
+                # keep map bounded to avoid unbounded growth
+                oldest_key = next(iter(self._imitation_reply_map))
+                if oldest_key != key:
+                    self._imitation_reply_map.pop(oldest_key, None)
 
     async def _ensure_internal_user(self, user: Optional[User]) -> Optional[int]:
         if user is None:
