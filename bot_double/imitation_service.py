@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
 import sqlite3
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple, TypeVar
 
@@ -30,6 +31,10 @@ CollectRequesterProfile = Callable[[int, Optional[User], int], Awaitable[Optiona
 RelationshipHintForAddressee = Callable[[int, int, Optional[int], str], Awaitable[Optional[str]]]
 EnsureInternalUser = Callable[[Optional[User]], Awaitable[Optional[int]]]
 GetPersonaCard = Callable[[int, int], Awaitable[Optional[str]]]
+ResolveUserDescriptor = Callable[
+    [Optional[int], str],
+    Awaitable[Tuple[Optional[sqlite3.Row], List[Tuple[sqlite3.Row, float]]]],
+]
 
 
 class ImitationService:
@@ -50,6 +55,7 @@ class ImitationService:
         relationship_hint_for_addressee: RelationshipHintForAddressee,
         ensure_internal_user: EnsureInternalUser,
         get_persona_card: GetPersonaCard,
+        resolve_user_descriptor: ResolveUserDescriptor,
     ) -> None:
         self._settings = settings
         self._db = db
@@ -64,6 +70,7 @@ class ImitationService:
         self._ensure_internal_user = ensure_internal_user
         self._get_persona_card = get_persona_card
         self._recent_targets: Dict[Tuple[int, int], int] = {}
+        self._resolve_user_descriptor = resolve_user_descriptor
 
     async def imitate_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
@@ -485,3 +492,146 @@ class ImitationService:
         self, chat_id: int, message_id: int
     ) -> Optional[ImitationChain]:
         return self._imitation.get_chain_for_message(chat_id, message_id)
+
+    async def maybe_handle_direct_imitation(
+        self,
+        message: Message,
+        cleaned_instruction: str,
+        stripped: str,
+    ) -> bool:
+        chat = message.chat
+        if chat is None:
+            return False
+        descriptor, remainder = self._extract_leading_descriptor(cleaned_instruction)
+        if not descriptor:
+            return False
+        resolved_row, _ = await self._resolve_user_descriptor(chat.id, descriptor)
+        if resolved_row is None:
+            return False
+        payload = remainder or self._imitation.extract_payload(
+            message, cleaned_instruction
+        )
+        if not payload:
+            payload = self._imitation.extract_payload(message, stripped)
+        if not payload:
+            payload = self._imitation.extract_reply_text(message)
+        persona_name = display_name(
+            resolved_row["username"],
+            resolved_row["first_name"],
+            resolved_row["last_name"],
+        )
+        user_text = self._imitation.prepare_chain_user_text(
+            instruction=cleaned_instruction or stripped,
+            payload=payload,
+            descriptor=descriptor,
+            persona_row=resolved_row,
+            persona_name=persona_name,
+            message=message,
+        )
+        if not user_text:
+            user_text = payload or "Продолжи разговор."
+        chain = self._imitation.create_chain(
+            chat.id,
+            resolved_row,
+            message.from_user,
+            user_text,
+            context_messages=self._imitation.collect_initial_context(message),
+        )
+        await self.handle_chain(message, resolved_row, chain)
+        return True
+
+    async def maybe_handle_followup(
+        self,
+        message: Message,
+        cleaned_instruction: str,
+        cleaned_lower: str,
+        stripped: str,
+        base_chain: Optional[ImitationChain],
+        reply_to_bot: bool,
+        fallback_persona_id: Optional[int],
+    ) -> bool:
+        chain_source = base_chain
+        persona_row: Optional[sqlite3.Row] = None
+        if chain_source is not None:
+            persona_row = await self._run_db(
+                self._db.get_user_by_id, chain_source.persona_id
+            )
+            if persona_row is None:
+                return False
+        elif reply_to_bot and fallback_persona_id is not None:
+            if message.chat_id is None:
+                return False
+            persona_row = await self._run_db(
+                self._db.get_user_by_id, fallback_persona_id
+            )
+            if persona_row is None:
+                return False
+            chain_source = self._imitation.create_chain(
+                message.chat_id,
+                persona_row,
+                message.from_user,
+                "",
+                context_messages=self._imitation.collect_initial_context(message),
+            )
+        else:
+            return False
+
+        followup_markers = (
+            "соглас",
+            "подроб",
+            "добав",
+            "продолж",
+            "опиши",
+            "расска",
+            "скажи",
+            "ответ",
+            "согласись",
+            "подтверди",
+        )
+        if not reply_to_bot and not any(marker in cleaned_lower for marker in followup_markers):
+            return False
+
+        persona_name = chain_source.persona_name
+        payload = self._imitation.extract_payload(
+            message,
+            cleaned_instruction,
+            keywords=["имитируй", "ответ", "скажи", "соглас"],
+        )
+        user_text = self._imitation.prepare_chain_user_text(
+            instruction=cleaned_instruction,
+            payload=payload,
+            descriptor=None,
+            persona_row=persona_row,
+            persona_name=persona_name,
+            message=message,
+        )
+        if not user_text and message.text:
+            stripped_original = self._imitation.strip_call_signs(message.text)
+            stripped_original = self._imitation.normalize_chain_text(stripped_original)
+            if stripped_original:
+                user_text = stripped_original
+        if not user_text:
+            reply_text = self._imitation.extract_reply_text(message)
+            if reply_text:
+                user_text = self._imitation.normalize_chain_text(reply_text)
+        if not user_text:
+            return False
+
+        chain = self._imitation.branch_chain(chain_source, message.from_user, user_text)
+        await self.handle_chain(message, persona_row, chain)
+        return True
+
+    @staticmethod
+    def _extract_leading_descriptor(text: str) -> Tuple[Optional[str], Optional[str]]:
+        cleaned = text.strip()
+        if not cleaned:
+            return None, None
+        cleaned = cleaned.lstrip(",:;—- ")
+        if not cleaned:
+            return None, None
+        match = re.match(r"^(@?[\w\-]+)", cleaned)
+        if not match:
+            return None, None
+        descriptor = match.group(1)
+        remainder = cleaned[match.end() :].lstrip(" ,:;—-")
+        return descriptor, (remainder or None)

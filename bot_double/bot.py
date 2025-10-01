@@ -181,6 +181,7 @@ class BotDouble:
             relationship_hint_for_addressee=self._relationship_hint_for_addressee,
             ensure_internal_user=self._ensure_internal_user,
             get_persona_card=self._get_persona_card,
+            resolve_user_descriptor=self._resolve_user_descriptor,
         )
 
     def build_application(self) -> Application:
@@ -705,6 +706,15 @@ class BotDouble:
         cleaned_instruction = self._imitation.strip_call_signs(stripped)
         cleaned_lower = cleaned_instruction.lower()
 
+        continuation_chain = reply_chain
+        followup_target_id: Optional[int] = None
+        if continuation_chain is not None:
+            followup_target_id = continuation_chain.persona_id
+        elif message.chat_id is not None and message.from_user is not None:
+            followup_target_id = self._imitation_service.get_recent_target(
+                message.chat_id, message.from_user.id
+            )
+
         imitation_request = self._parse_imitation_request(cleaned_instruction)
         if imitation_request:
             descriptor, inline_payload = imitation_request
@@ -784,6 +794,29 @@ class BotDouble:
                 context_messages=self._imitation.collect_initial_context(message),
             )
             await self._imitation_service.handle_chain(message, resolved_row, chain)
+            return True
+
+        if (
+            (continuation_chain is not None or followup_target_id is not None)
+            and await self._imitation_service.maybe_handle_followup(
+                message,
+                cleaned_instruction,
+                cleaned_lower,
+                stripped,
+                continuation_chain,
+                reply_to_bot,
+                followup_target_id,
+            )
+        ):
+            return True
+
+        if (
+            direct_address
+            and not self._imitation.should_skip_chain(cleaned_lower)
+            and await self._imitation_service.maybe_handle_direct_imitation(
+                message, cleaned_instruction, stripped
+            )
+        ):
             return True
 
         if (
