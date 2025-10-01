@@ -88,6 +88,14 @@ CREATE TABLE IF NOT EXISTS user_aliases (
     PRIMARY KEY (chat_id, normalized_alias),
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS persona_preferences (
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    mode INTEGER NOT NULL DEFAULT 2, -- 0=summary,1=card,2=auto
+    PRIMARY KEY (chat_id, user_id),
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
 """
 
 
@@ -198,6 +206,29 @@ class Database:
         )
         row = cursor.fetchone()
         return int(row["cnt"]) if row else 0
+
+    # --- persona preferences ---------------------------------------------------------
+    def set_persona_preference(self, chat_id: int, user_id: int, mode: int) -> None:
+        if mode not in (0, 1, 2):
+            raise ValueError("mode must be 0 (summary), 1 (card), or 2 (auto)")
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO persona_preferences (chat_id, user_id, mode)
+                VALUES (?, ?, ?)
+                ON CONFLICT(chat_id, user_id)
+                DO UPDATE SET mode = excluded.mode
+                """,
+                (chat_id, user_id, mode),
+            )
+
+    def get_persona_preference(self, chat_id: int, user_id: int) -> int:
+        cursor = self._conn.execute(
+            "SELECT mode FROM persona_preferences WHERE chat_id = ? AND user_id = ?",
+            (chat_id, user_id),
+        )
+        row = cursor.fetchone()
+        return int(row["mode"]) if row and row["mode"] is not None else 2
 
     def get_user_by_username(self, username: str) -> Optional[sqlite3.Row]:
         cursor = self._conn.execute(

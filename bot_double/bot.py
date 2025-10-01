@@ -450,6 +450,37 @@ class BotDouble:
                 f"Для @{username} не было сохранённых прозвищ."
             )
 
+    async def persona_mode_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        chat = update.effective_chat
+        if message is None or chat is None:
+            return
+        if len(context.args) < 2:
+            await message.reply_text(
+                "Использование: /persona_mode @username <card|summary|auto>"
+            )
+            return
+        username_token, mode_token = context.args[0], context.args[1].lower().strip()
+        if not username_token.startswith("@"):
+            await message.reply_text("Первым аргументом должен быть @username")
+            return
+        username = username_token.lstrip("@")
+        row = await self._run_db(self._db.get_user_by_username, username)
+        if row is None:
+            await message.reply_text(f"Я ещё не знаю пользователя @{username}.")
+            return
+        internal_id = int(row["id"])
+        mode_map = {"summary": 0, "card": 1, "auto": 2}
+        if mode_token not in mode_map:
+            await message.reply_text("Режим должен быть одним из: card, summary, auto")
+            return
+        await self._run_db(
+            self._db.set_persona_preference, chat.id, internal_id, mode_map[mode_token]
+        )
+        await message.reply_text(
+            f"Режим для @{username}: {mode_token}."
+        )
+
     async def on_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
         chat = update.effective_chat
@@ -2126,6 +2157,20 @@ class BotDouble:
             return (text[:limit]).rstrip() + "\u2026"
         return text
 
+    async def _choose_persona_artifacts(
+        self, chat_id: int, user_id: int, samples: list[str]
+    ) -> tuple[Optional[str], Optional[str]]:
+        mode = await self._run_db(self._db.get_persona_preference, chat_id, user_id)
+        # 0=summary, 1=card, 2=auto
+        if mode == 0:
+            return None, build_style_summary(samples)
+        if mode == 1:
+            card = await self._get_persona_card(chat_id, user_id)
+            return card, None if card else build_style_summary(samples)
+        # auto
+        card = await self._get_persona_card(chat_id, user_id)
+        return card, None if card else build_style_summary(samples)
+
     def _parse_language(self, lowered_text: str) -> str:
         language_hints = {
             "англ": "английский",
@@ -2207,8 +2252,9 @@ class BotDouble:
                 f"Сообщений {display} пока недостаточно для генерации ответа."
             )
             return
-        persona_card = await self._get_persona_card(chat.id, user_id)
-        style_summary = None if persona_card else build_style_summary(samples)
+        persona_card, style_summary = await self._choose_persona_artifacts(
+            chat.id, user_id, samples
+        )
         persona_name = chain.persona_name
         context_messages = None
         peer_profiles = await self._collect_peer_profiles(chat.id, user_id)
@@ -3260,6 +3306,7 @@ def run_bot(settings: Settings) -> None:
     application.add_handler(CommandHandler("forgetme", bot.forget_me))
     application.add_handler(CommandHandler("alias", bot.alias_command))
     application.add_handler(CommandHandler("alias_reset", bot.alias_reset_command))
+    application.add_handler(CommandHandler("persona_mode", bot.persona_mode_command))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, bot.on_new_members))
     application.add_handler(MessageHandler(filters.VOICE, bot.on_voice_message))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.on_text_message))
