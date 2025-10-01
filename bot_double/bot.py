@@ -1765,7 +1765,9 @@ class BotDouble:
             return None
         text = self._strip_call_signs(instruction).strip()
         text = self._strip_command_prefix(text)
-        text = self._remove_descriptor_mentions(text, descriptor, persona_row, persona_name)
+        text = self._remove_descriptor_mentions(
+            text, descriptor, persona_row, persona_name
+        )
         return text or None
 
     def _clean_imitation_payload(
@@ -1924,6 +1926,9 @@ class BotDouble:
             stripped_original = stripped_original.strip()
             if stripped_original:
                 stripped_original = self._strip_command_prefix(stripped_original)
+                stripped_original = self._remove_descriptor_mentions(
+                    stripped_original, descriptor, persona_row, persona_name
+                )
                 candidates.append(stripped_original)
         unique: List[str] = []
         seen: Set[str] = set()
