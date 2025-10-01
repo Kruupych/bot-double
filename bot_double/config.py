@@ -38,6 +38,7 @@ class Settings:
     voice_transcription_model: str = "gpt-4o-mini-transcribe"
     voice_transcription_language: Optional[str] = "ru"
     voice_transcription_max_duration: int = 180
+    enable_freeform_intents: bool = True
     relationship_analysis_model: Optional[str] = None
     relationship_analysis_min_pending: int = 5
     relationship_analysis_min_hours: int = 24
@@ -149,6 +150,7 @@ def load_settings() -> Settings:
     voice_transcription_max_duration = _get_env_int(
         "VOICE_TRANSCRIPTION_MAX_DURATION", 180, minimum=0
     )
+    enable_freeform_intents = _get_env_bool("ENABLE_FREEFORM_INTENTS", True)
     rel_model = os.getenv("RELATIONSHIP_ANALYSIS_MODEL")
     rel_min_pending = _get_env_int("RELATIONSHIP_ANALYSIS_MIN_PENDING", 5, minimum=1)
     rel_min_hours = _get_env_int("RELATIONSHIP_ANALYSIS_MIN_HOURS", 24, minimum=0)
@@ -197,6 +199,7 @@ def load_settings() -> Settings:
         voice_transcription_model=voice_transcription_model,
         voice_transcription_language=voice_transcription_language,
         voice_transcription_max_duration=voice_transcription_max_duration,
+        enable_freeform_intents=enable_freeform_intents,
         relationship_analysis_model=rel_model,
         relationship_analysis_min_pending=rel_min_pending,
         relationship_analysis_min_hours=rel_min_hours,
