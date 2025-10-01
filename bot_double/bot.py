@@ -340,6 +340,22 @@ class BotDouble:
 
         await message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
+    async def imitate_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        if message is None:
+            return
+        lines = [
+            "Как попросить меня отвечать за других:",
+            "• /imitate @username текст — классическая команда.",
+            "• В реплае: ‘имитируй @username …’ или ‘ответь как Тимофей …’.",
+            "• Без @username — добавьте прозвища через /alias @user имя, nickname.",
+            "• После ответа можно продолжать реплаем: ‘согласись’, ‘добавь деталей’, ‘переведи’.",
+            "• Голосовые команды тоже работают: ‘двойник, переведи на английский…’.",
+            "• Полезные подсказки: ‘перескажи’, ‘перефразируй’, ‘исправь ошибки’, ‘сделай список задач’.",
+            "• Итог: чтобы я сработал, обращайтесь по имени/кличке или отвечайте на мой ответ.",
+        ]
+        await message.reply_text("\n".join(lines), disable_web_page_preview=True)
+
     async def auto_imitate_toggle(self, update: Update, context: ContextTypes.DEFAULT_TYPE, *, enabled: bool) -> None:
         message = update.effective_message
         chat = update.effective_chat
@@ -2635,6 +2651,7 @@ def run_bot(settings: Settings) -> None:
 
     application.add_handler(CommandHandler("imitate", bot.imitate))
     application.add_handler(CommandHandler("imitate_profiles", bot.imitate_profiles))
+    application.add_handler(CommandHandler("imitate_help", bot.imitate_help))
     application.add_handler(CommandHandler("auto_imitate_on", bot.auto_imitate_on))
     application.add_handler(CommandHandler("auto_imitate_off", bot.auto_imitate_off))
     application.add_handler(CommandHandler("dialogue", bot.dialogue))
