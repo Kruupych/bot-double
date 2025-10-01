@@ -1289,6 +1289,15 @@ class BotDouble:
             )
             return True
 
+        if direct_address:
+            handled = await self._handle_implicit_imitation(
+                message,
+                cleaned_instruction,
+                stripped,
+            )
+            if handled:
+                return True
+
         if not direct_address and not reply_to_bot and message.chat.type != "private":
             return False
 
@@ -1517,6 +1526,34 @@ class BotDouble:
 
         return False
 
+    async def _handle_implicit_imitation(
+        self,
+        message: Message,
+        cleaned_instruction: str,
+        stripped: str,
+    ) -> bool:
+        chat = message.chat
+        if chat is None:
+            return False
+        descriptor, remainder = self._extract_leading_descriptor(cleaned_instruction)
+        if not descriptor:
+            return False
+        resolved_row, suggestions = await self._resolve_user_descriptor(
+            chat.id, descriptor
+        )
+        if resolved_row is None:
+            return False
+        base_payload = remainder or self._extract_payload(message, cleaned_instruction)
+        starter = self._build_imitation_starter(
+            base_payload=base_payload,
+            instruction=cleaned_instruction or stripped,
+            descriptor=descriptor,
+            persona_row=resolved_row,
+            message=message,
+        )
+        await self._handle_imitation_for_user(message, resolved_row, starter)
+        return True
+
     def _is_direct_address(self, message: Message, lowered_text: str) -> bool:
         chat = message.chat
         if chat and chat.type == "private":
@@ -1665,6 +1702,22 @@ class BotDouble:
         text = self._strip_call_signs(payload).strip()
         text = self._remove_descriptor_mentions(text, None, persona_row, persona_name)
         return text or None
+
+    def _extract_leading_descriptor(
+        self, instruction: str
+    ) -> Tuple[Optional[str], Optional[str]]:
+        text = instruction.strip()
+        if not text:
+            return None, None
+        text = text.lstrip(",:;—- ")
+        if not text:
+            return None, None
+        match = re.match(r"^(@?[\w\-]+)", text)
+        if not match:
+            return None, None
+        descriptor = match.group(1)
+        remainder = text[match.end() :].lstrip(" ,:;—-")
+        return descriptor, (remainder or None)
 
     def _strip_command_prefix(self, text: str) -> str:
         lowered = text.lower()
