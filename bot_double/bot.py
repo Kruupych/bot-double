@@ -296,6 +296,8 @@ class BotDouble:
         chat = update.effective_chat
         if not message or not chat:
             return
+        # Flush any buffered texts for this chat so counters are up-to-date
+        await self._flush_buffers_for_chat(chat.id)
 
         lines: List[str] = ["Статус профилей:"]
         has_profiles = False
@@ -2758,6 +2760,15 @@ class BotDouble:
         async with self._buffer_lock:
             keys = list(self._burst_states.keys())
         for key in keys:
+            await self._flush_buffer_for_key(key)
+
+    async def _flush_buffers_for_chat(self, chat_id: int) -> None:
+        to_flush: list[tuple[int, int]] = []
+        async with self._buffer_lock:
+            for key, burst in self._burst_states.items():
+                if burst.chat_id == chat_id:
+                    to_flush.append(key)
+        for key in to_flush:
             await self._flush_buffer_for_key(key)
 
     async def _generate_reply(
