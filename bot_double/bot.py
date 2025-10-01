@@ -1191,7 +1191,13 @@ class BotDouble:
                 payload = remainder[idx + 1 :].strip() or None
                 if descriptor:
                     return descriptor, payload
-        return remainder.strip(), None
+        remainder = remainder.strip()
+        if not remainder:
+            return None, None
+        parts = remainder.split(None, 1)
+        descriptor = parts[0].strip(".,!?-—:;")
+        payload = parts[1].strip() if len(parts) > 1 else None
+        return descriptor or None, payload
 
     def _descriptor_from_prefix(self, prefix: str) -> Optional[str]:
         prefix = prefix.strip()
@@ -1917,16 +1923,21 @@ class BotDouble:
             )
             stripped_original = stripped_original.strip()
             if stripped_original:
+                stripped_original = self._strip_command_prefix(stripped_original)
                 candidates.append(stripped_original)
         unique: List[str] = []
+        seen: Set[str] = set()
         for candidate in candidates:
             normalized = self._normalize_chain_text(candidate)
             if not normalized:
                 continue
             if normalized.startswith("/"):
                 continue
-            if normalized not in unique:
-                unique.append(normalized)
+            key = normalized.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(normalized)
         if unique:
             return "\n".join(unique)
         return None
