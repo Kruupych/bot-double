@@ -30,7 +30,7 @@ from .imitation_service import ImitationService
 from .message_pipeline import MessagePipeline
 from .config import Settings
 from .db import Database
-from .imitation import ImitationToolkit
+from .imitation import ImitationChain, ImitationToolkit
 from .style_engine import (
     ContextMessage,
     ParticipantProfile,
@@ -668,6 +668,310 @@ class BotDouble:
         else:
             await message.reply_text(text, disable_web_page_preview=True)
         return text
+
+    async def _maybe_handle_intent(
+        self, message: Message, text: str, from_voice: bool
+    ) -> bool:
+        if not self._settings.enable_freeform_intents or self._assistant_tasks is None:
+            return False
+        stripped = text.strip()
+        if not stripped:
+            return False
+
+        lowered = stripped.lower()
+        direct_address = self._is_direct_address(message, lowered)
+        reply_to_bot = (
+            message.reply_to_message
+            and message.reply_to_message.from_user
+            and self._bot_id is not None
+            and message.reply_to_message.from_user.id == self._bot_id
+        )
+
+        reply_chain: Optional[ImitationChain] = None
+        if (
+            reply_to_bot
+            and message.reply_to_message
+            and message.chat_id is not None
+        ):
+            reply_chain = self._imitation_service.get_chain_for_message(
+                message.chat_id,
+                message.reply_to_message.message_id,
+            )
+            if reply_chain and message.from_user is not None:
+                self._imitation_service.remember_target(
+                    message.chat_id, message.from_user.id, reply_chain.persona_id
+                )
+
+        cleaned_instruction = self._imitation.strip_call_signs(stripped)
+        cleaned_lower = cleaned_instruction.lower()
+
+        imitation_request = self._parse_imitation_request(cleaned_instruction)
+        if imitation_request:
+            descriptor, inline_payload = imitation_request
+            resolved_row, suggestions = await self._resolve_user_descriptor(
+                message.chat_id, descriptor
+            )
+            if resolved_row is None:
+                if suggestions:
+                    lines = ["Не уверена, кого имитировать. Возможные варианты:"]
+                    alias_display = {}
+                    if message.chat is not None:
+                        _, alias_display = await self._get_alias_maps(message.chat.id)
+                    for candidate, _score in suggestions:
+                        name = display_name(
+                            candidate["username"],
+                            candidate["first_name"],
+                            candidate["last_name"],
+                        )
+                        username = candidate["username"]
+                        handle = f"@{username}" if username else name
+                        aliases = alias_display.get(int(candidate["id"]), [])
+                        alias_hint = (
+                            f" (алиасы: {', '.join(aliases)})" if aliases else ""
+                        )
+                        lines.append(f"• {handle}{alias_hint}")
+                    lines.append(
+                        "Уточните имя или создайте прозвища через /alias @username ..."
+                    )
+                    await message.reply_text("\n".join(lines))
+                else:
+                    await message.reply_text(
+                        "Не могу понять, кого имитировать. Используйте @username или добавьте алиас через /alias."
+                    )
+                return True
+
+            payload = inline_payload or self._imitation.extract_payload(
+                message,
+                cleaned_instruction,
+                keywords=["имитируй", "ответь как", "что бы сказал"],
+            )
+            if not payload:
+                payload = self._imitation.extract_reply_text(message)
+            if not payload:
+                await message.reply_text(
+                    "Нужен текст для имитации — добавьте подсказку или ответьте на сообщение."
+                )
+                return True
+
+            persona_name = display_name(
+                resolved_row["username"],
+                resolved_row["first_name"],
+                resolved_row["last_name"],
+            )
+            user_text = self._imitation.prepare_chain_user_text(
+                instruction=cleaned_instruction or stripped,
+                payload=payload,
+                descriptor=descriptor,
+                persona_row=resolved_row,
+                persona_name=persona_name,
+                message=message,
+            )
+            if not user_text:
+                await message.reply_text(
+                    "Нужен текст для имитации — добавьте подсказку или ответьте на сообщение."
+                )
+                return True
+
+            chat_id = message.chat_id
+            if chat_id is None:
+                return True
+
+            chain = self._imitation.create_chain(
+                chat_id,
+                resolved_row,
+                message.from_user,
+                user_text,
+                context_messages=self._imitation.collect_initial_context(message),
+            )
+            await self._imitation_service.handle_chain(message, resolved_row, chain)
+            return True
+
+        if (
+            not direct_address
+            and not reply_to_bot
+            and message.chat is not None
+            and message.chat.type != "private"
+        ):
+            return False
+
+        payload: Optional[str]
+
+        if any(token in cleaned_lower for token in ("переведи", "translate")):
+            language = self._parse_language(cleaned_lower)
+            payload = self._imitation.extract_payload(
+                message,
+                cleaned_instruction,
+                keywords=["переведи", "translate"],
+            )
+            if not payload:
+                await message.reply_text(
+                    "Пришлите текст для перевода или ответьте на сообщение с текстом."
+                )
+                return True
+            await self._execute_assistant_task(
+                message,
+                self._assistant_tasks.translate,
+                payload,
+                language,
+                prefix=f"Перевод на {language}:",
+            )
+            return True
+
+        if any(token in cleaned_lower for token in ("перескаж", "резюмируй", "кратко")):
+            payload = self._imitation.extract_payload(
+                message,
+                cleaned_instruction,
+                keywords=["перескаж", "резюмируй", "кратко"],
+            )
+            if not payload:
+                await message.reply_text(
+                    "Чтобы пересказать, ответьте на сообщение или укажите текст после двоеточия."
+                )
+                return True
+            await self._execute_assistant_task(
+                message,
+                self._assistant_tasks.summarize,
+                payload,
+                prefix="Кратко:",
+            )
+            return True
+
+        if any(token in cleaned_lower for token in ("перефраз", "формулир")):
+            payload = self._imitation.extract_payload(
+                message,
+                cleaned_instruction,
+                keywords=["перефраз", "сформулируй", "формулир"],
+            )
+            if not payload:
+                await message.reply_text(
+                    "Добавьте текст для перефразирования или ответьте на сообщение."
+                )
+                return True
+            await self._execute_assistant_task(
+                message,
+                self._assistant_tasks.paraphrase,
+                payload,
+                "Перепиши текст своими словами, сохранив смысл.",
+            )
+            return True
+
+        if "исправь ошибки" in cleaned_lower or (
+            "провер" in cleaned_lower and "ошиб" in cleaned_lower
+        ):
+            payload = self._imitation.extract_payload(
+                message,
+                cleaned_instruction,
+                keywords=["исправь", "проверь", "ошиб"],
+            )
+            if not payload:
+                await message.reply_text(
+                    "Чтобы исправить ошибки, пришлите текст или ответьте на сообщение."
+                )
+                return True
+            await self._execute_assistant_task(
+                message,
+                self._assistant_tasks.proofread,
+                payload,
+            )
+            return True
+
+        if "список" in cleaned_lower and "задач" in cleaned_lower:
+            payload = self._imitation.extract_payload(
+                message,
+                cleaned_instruction,
+                keywords=["список", "задач", "сделай"],
+            )
+            if not payload:
+                await message.reply_text(
+                    "Чтобы составить список задач, ответьте на сообщение или добавьте текст после команды."
+                )
+                return True
+            await self._execute_assistant_task(
+                message,
+                self._assistant_tasks.listify,
+                payload,
+            )
+            return True
+
+        tone_instruction: Optional[str] = None
+        if "вежлив" in cleaned_lower:
+            tone_instruction = "Сделай текст вежливым и уважительным."
+        elif "официал" in cleaned_lower:
+            tone_instruction = "Сделай текст официальным и деловым."
+        elif "дружелюб" in cleaned_lower:
+            tone_instruction = "Сделай текст дружелюбным и тёплым."
+        elif "токсич" in cleaned_lower:
+            tone_instruction = "Убери токсичность и агрессию, сделай нейтральным."
+        elif "добавь" in cleaned_lower and (
+            "смай" in cleaned_lower or "эмодз" in cleaned_lower
+        ):
+            tone_instruction = "Добавь немного уместных эмодзи."
+        elif "убери" in cleaned_lower and (
+            "смай" in cleaned_lower or "эмодз" in cleaned_lower
+        ):
+            tone_instruction = "Убери эмодзи и сделай текст нейтральным."
+
+        if tone_instruction:
+            payload = self._imitation.extract_payload(
+                message,
+                cleaned_instruction,
+                keywords=[
+                    "сделай",
+                    "убери",
+                    "добавь",
+                    "вежлив",
+                    "дружелюб",
+                    "токсич",
+                    "эмодз",
+                    "смай",
+                ],
+            )
+            if not payload:
+                await message.reply_text(
+                    "Чтобы изменить тон, добавьте текст или ответьте на сообщение."
+                )
+                return True
+            await self._execute_assistant_task(
+                message,
+                self._assistant_tasks.paraphrase,
+                payload,
+                tone_instruction,
+            )
+            return True
+
+        if (
+            "что ответить" in cleaned_lower
+            or "сформулируй ответ" in cleaned_lower
+            or "помоги ответить" in cleaned_lower
+        ):
+            payload = self._imitation.extract_payload(
+                message,
+                cleaned_instruction,
+                keywords=["что ответить", "сформулируй", "ответ"],
+            )
+            if not payload:
+                await message.reply_text(
+                    "Чтобы помочь с ответом, добавьте текст сообщения или ответьте на него."
+                )
+                return True
+            await self._execute_assistant_task(
+                message,
+                self._assistant_tasks.respond_helpfully,
+                payload,
+                "Ответь кратко и по существу.",
+            )
+            return True
+
+        if direct_address and "?" in stripped and len(stripped) >= 3:
+            await self._execute_assistant_task(
+                message,
+                self._assistant_tasks.respond_helpfully,
+                stripped,
+                "Ответь честно и по-человечески.",
+            )
+            return True
+
+        return False
 
     async def _ensure_internal_user(self, user: Optional[User]) -> Optional[int]:
         if user is None:
@@ -1362,7 +1666,7 @@ class BotDouble:
 
     def _build_intro_message(self) -> str:
         return (
-            f"Привет! Я {self._bot_name}, бот-двоиник. Я изучаю стиль общения участников"
+            f"Привет! Я {self._bot_name}. Я изучаю стиль общения участников"
             " и могу отвечать за них.\n\n"
             "Что я умею:\n"
             "• /imitate @username [текст] — ответить в стиле участника.\n"

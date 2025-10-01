@@ -469,3 +469,19 @@ class ImitationService:
     @property
     def recent_targets(self) -> Dict[Tuple[int, int], int]:
         return self._recent_targets
+
+    def remember_target(self, chat_id: int, user_id: int, persona_id: int) -> None:
+        self._recent_targets[(chat_id, user_id)] = persona_id
+
+    def get_recent_target(self, chat_id: int, user_id: int) -> Optional[int]:
+        return self._recent_targets.get((chat_id, user_id))
+
+    async def handle_chain(
+        self, message: Message, user_row: sqlite3.Row, chain: ImitationChain
+    ) -> None:
+        await self._handle_imitation_for_user(message, user_row, chain)
+
+    def get_chain_for_message(
+        self, chat_id: int, message_id: int
+    ) -> Optional[ImitationChain]:
+        return self._imitation.get_chain_for_message(chat_id, message_id)
