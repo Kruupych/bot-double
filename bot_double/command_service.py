@@ -3,7 +3,10 @@ from __future__ import annotations
 from typing import Awaitable, Callable, Optional, Sequence, TypeVar
 
 from telegram import Update, User
+from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
+
+from .config import Settings
 from .db import Database
 from .utils import display_name
 
@@ -18,19 +21,23 @@ class CommandService:
     def __init__(
         self,
         *,
+        settings: Settings,
         db: Database,
         run_db: RunDB,
         invalidate_alias_cache: Callable[[Optional[int]], None],
         get_persona_card: Callable[[int, int], Awaitable[Optional[str]]],
         get_relationship_summary_text: Callable[[int, int, int], Awaitable[Optional[str]]],
         ensure_internal_user: Callable[[Optional[User]], Awaitable[Optional[int]]],
+        flush_buffers_for_chat: Callable[[int], Awaitable[None]],
     ) -> None:
+        self._settings = settings
         self._db = db
         self._run_db = run_db
         self._invalidate_alias_cache = invalidate_alias_cache
         self._get_persona_card = get_persona_card
         self._get_relationship_summary_text = get_relationship_summary_text
         self._ensure_internal_user = ensure_internal_user
+        self._flush_buffers_for_chat = flush_buffers_for_chat
 
     async def alias_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
@@ -135,6 +142,71 @@ class CommandService:
             self._db.set_persona_preference, chat.id, internal_id, mode_map[mode_token]
         )
         await message.reply_text(f"Режим для @{username}: {mode_token}.")
+
+    async def imitate_profiles(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        chat = update.effective_chat
+        if not message or not chat:
+            return
+        await self._flush_buffers_for_chat(chat.id)
+
+        lines = ["Статус профилей:"]
+        has_profiles = False
+        profiles = await self._run_db(self._db.get_profiles, chat.id)
+        for row in profiles:
+            has_profiles = True
+            persona_name = display_name(
+                row["username"], row["first_name"], row["last_name"]
+            )
+            count = int(row["message_count"])
+            if count >= self._settings.min_messages_for_profile:
+                marker = "✅"
+                info = f"{persona_name} (проанализировано {count} сообщений)"
+            else:
+                marker = "⏳"
+                info = (
+                    f"{persona_name} (собрано {count}/{self._settings.min_messages_for_profile} сообщений,"
+                    " анализ скоро будет доступен)"
+                )
+            lines.append(f"{marker} {info}")
+
+        if not has_profiles:
+            lines.append("Данных пока нет")
+
+        await message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+    async def imitate_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        if message is None:
+            return
+        lines = [
+            "Как попросить меня отвечать за других:",
+            "• /imitate @username текст — классическая команда.",
+            "• В реплае: ‘имитируй @username …’ или ‘ответь как Тимофей …’.",
+            "• Без @username — добавьте прозвища через /alias @user имя, nickname.",
+            "• После ответа можно продолжать реплаем: ‘согласись’, ‘добавь деталей’, ‘переведи’.",
+            "• Голосовые команды тоже работают: ‘двойник, переведи на английский…’.",
+            "• Полезные подсказки: ‘перескажи’, ‘перефразируй’, ‘исправь ошибки’, ‘сделай список задач’.",
+            "• Итог: чтобы я сработал, обращайтесь по имени/кличке или отвечайте на мой ответ.",
+        ]
+        await message.reply_text("\n".join(lines), disable_web_page_preview=True)
+
+    async def auto_imitate_toggle(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, *, enabled: bool
+    ) -> None:
+        message = update.effective_message
+        chat = update.effective_chat
+        if not message or not chat:
+            return
+        await self._run_db(self._db.set_auto_imitate, chat.id, enabled)
+        status = "включена" if enabled else "выключена"
+        await message.reply_text(f"Автоимитация {status} для этого чата")
+
+    async def auto_imitate_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self.auto_imitate_toggle(update, context, enabled=True)
+
+    async def auto_imitate_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self.auto_imitate_toggle(update, context, enabled=False)
 
     async def profile_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message

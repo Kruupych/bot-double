@@ -13,7 +13,6 @@ from functools import partial
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, TypeVar
 
 from telegram import Message, MessageEntity, Update, User
-from telegram.constants import ParseMode
 from telegram.ext import (
     AIORateLimiter,
     Application,
@@ -162,12 +161,14 @@ class BotDouble:
             )
 
         self._commands = CommandService(
+            settings=self._settings,
             db=self._db,
             run_db=self._run_db,
             invalidate_alias_cache=self._invalidate_alias_cache,
             get_persona_card=self._get_persona_card,
             get_relationship_summary_text=self._get_relationship_summary_text,
             ensure_internal_user=self._ensure_internal_user,
+            flush_buffers_for_chat=self._message_pipeline.flush_buffers_for_chat,
         )
 
     def build_application(self) -> Application:
@@ -271,70 +272,6 @@ class BotDouble:
         )
         await self._handle_imitation_for_user(message, user_row, chain)
 
-    async def imitate_profiles(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        message = update.effective_message
-        chat = update.effective_chat
-        if not message or not chat:
-            return
-        # Flush any buffered texts for this chat so counters are up-to-date
-        await self._message_pipeline.flush_buffers_for_chat(chat.id)
-
-        lines: List[str] = ["Статус профилей:"]
-        has_profiles = False
-        profiles = await self._run_db(self._db.get_profiles, chat.id)
-        for row in profiles:
-            has_profiles = True
-            persona_name = display_name(
-                row["username"], row["first_name"], row["last_name"]
-            )
-            count = int(row["message_count"])
-            if count >= self._settings.min_messages_for_profile:
-                marker = "✅"
-                info = f"{persona_name} (проанализировано {count} сообщений)"
-            else:
-                marker = "⏳"
-                info = (
-                    f"{persona_name} (собрано {count}/{self._settings.min_messages_for_profile} сообщений,"
-                    " анализ скоро будет доступен)"
-                )
-            lines.append(f"{marker} {info}")
-
-        if not has_profiles:
-            lines.append("Данных пока нет")
-
-        await message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
-
-    async def imitate_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        message = update.effective_message
-        if message is None:
-            return
-        lines = [
-            "Как попросить меня отвечать за других:",
-            "• /imitate @username текст — классическая команда.",
-            "• В реплае: ‘имитируй @username …’ или ‘ответь как Тимофей …’.",
-            "• Без @username — добавьте прозвища через /alias @user имя, nickname.",
-            "• После ответа можно продолжать реплаем: ‘согласись’, ‘добавь деталей’, ‘переведи’.",
-            "• Голосовые команды тоже работают: ‘двойник, переведи на английский…’.",
-            "• Полезные подсказки: ‘перескажи’, ‘перефразируй’, ‘исправь ошибки’, ‘сделай список задач’.",
-            "• Итог: чтобы я сработал, обращайтесь по имени/кличке или отвечайте на мой ответ.",
-        ]
-        await message.reply_text("\n".join(lines), disable_web_page_preview=True)
-
-    async def auto_imitate_toggle(self, update: Update, context: ContextTypes.DEFAULT_TYPE, *, enabled: bool) -> None:
-        message = update.effective_message
-        chat = update.effective_chat
-        if not message or not chat:
-            return
-        await self._run_db(self._db.set_auto_imitate, chat.id, enabled)
-        status = "включена" if enabled else "выключена"
-        await message.reply_text(f"Автоимитация {status} для этого чата")
-
-    async def auto_imitate_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self.auto_imitate_toggle(update, context, enabled=True)
-
-    async def auto_imitate_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self.auto_imitate_toggle(update, context, enabled=False)
-
     async def on_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
         chat = update.effective_chat
@@ -351,57 +288,8 @@ class BotDouble:
             message, processed_text, from_voice
         ):
             return
-
-        is_enabled = await self._run_db(self._db.is_auto_imitate_enabled, chat.id)
-        if not is_enabled:
+        if await self._maybe_auto_imitate(message):
             return
-
-        mention_usernames = self._extract_mentions(message)
-        if not mention_usernames:
-            return
-
-        username = self._pick_candidate_username(mention_usernames, message.from_user.username)
-        if not username:
-            return
-
-        user_row = await self._run_db(self._db.get_user_by_username, username)
-        if user_row is None:
-            return
-
-        message_count = await self._run_db(
-            self._db.get_message_count, chat.id, int(user_row["id"])
-        )
-        if message_count < self._settings.min_messages_for_profile:
-            return
-
-        if random.random() > self._settings.auto_imitate_probability:
-            return
-
-        # Use message text without mentions as starter
-        starter = self._strip_mentions(message.text or "", mention_usernames)
-        persona_name = display_name(
-            user_row["username"],
-            user_row["first_name"],
-            user_row["last_name"],
-        )
-        user_text = self._imitation.prepare_chain_user_text(
-            instruction=starter,
-            payload=starter,
-            descriptor=None,
-            persona_row=user_row,
-            persona_name=persona_name,
-            message=message,
-        )
-        if not user_text:
-            user_text = "Продолжи разговор."
-        chain = self._imitation.create_chain(
-            chat.id,
-            user_row,
-            message.from_user,
-            user_text,
-            context_messages=self._imitation.collect_initial_context(message),
-        )
-        await self._handle_imitation_for_user(message, user_row, chain)
 
     async def on_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
@@ -620,6 +508,63 @@ class BotDouble:
         for username in usernames:
             cleaned = cleaned.replace(f"@{username}", "").strip()
         return cleaned or "Продолжи диалог."
+
+    async def _maybe_auto_imitate(self, message: Message) -> bool:
+        chat = message.chat
+        if chat is None or message.from_user is None:
+            return False
+        is_enabled = await self._run_db(self._db.is_auto_imitate_enabled, chat.id)
+        if not is_enabled:
+            return False
+
+        mention_usernames = self._extract_mentions(message)
+        if not mention_usernames:
+            return False
+
+        username = self._pick_candidate_username(
+            mention_usernames, message.from_user.username
+        )
+        if not username:
+            return False
+
+        user_row = await self._run_db(self._db.get_user_by_username, username)
+        if user_row is None:
+            return False
+
+        message_count = await self._run_db(
+            self._db.get_message_count, chat.id, int(user_row["id"])
+        )
+        if message_count < self._settings.min_messages_for_profile:
+            return False
+
+        if random.random() > self._settings.auto_imitate_probability:
+            return False
+
+        starter = self._strip_mentions(message.text or "", mention_usernames)
+        persona_name = display_name(
+            user_row["username"],
+            user_row["first_name"],
+            user_row["last_name"],
+        )
+        user_text = self._imitation.prepare_chain_user_text(
+            instruction=starter,
+            payload=starter,
+            descriptor=None,
+            persona_row=user_row,
+            persona_name=persona_name,
+            message=message,
+        )
+        if not user_text:
+            user_text = "Продолжи разговор."
+        chain = self._imitation.create_chain(
+            chat.id,
+            user_row,
+            message.from_user,
+            user_text,
+            context_messages=self._imitation.collect_initial_context(message),
+        )
+        await self._handle_imitation_for_user(message, user_row, chain)
+        return True
 
     async def _get_alias_maps(
         self, chat_id: int
@@ -1827,10 +1772,10 @@ def run_bot(settings: Settings) -> None:
     application = bot.build_application()
 
     application.add_handler(CommandHandler("imitate", bot.imitate))
-    application.add_handler(CommandHandler("imitate_profiles", bot.imitate_profiles))
-    application.add_handler(CommandHandler("imitate_help", bot.imitate_help))
-    application.add_handler(CommandHandler("auto_imitate_on", bot.auto_imitate_on))
-    application.add_handler(CommandHandler("auto_imitate_off", bot.auto_imitate_off))
+    application.add_handler(CommandHandler("imitate_profiles", bot.commands.imitate_profiles))
+    application.add_handler(CommandHandler("imitate_help", bot.commands.imitate_help))
+    application.add_handler(CommandHandler("auto_imitate_on", bot.commands.auto_imitate_on))
+    application.add_handler(CommandHandler("auto_imitate_off", bot.commands.auto_imitate_off))
     application.add_handler(CommandHandler("dialogue", bot.dialogue))
     application.add_handler(CommandHandler("profile", bot.commands.profile_command))
     application.add_handler(CommandHandler("me", bot.commands.profile_command))
