@@ -160,6 +160,7 @@ class BotDouble:
         self._alias_display_cache: Dict[int, Dict[int, List[str]]] = {}
         self._transcriber: Optional[SpeechTranscriber] = None
         self._assistant_tasks: Optional[AssistantTaskEngine] = None
+        self._recent_imitation_targets: Dict[Tuple[int, int], int] = {}
         if self._settings.enable_voice_transcription:
             self._transcriber = SpeechTranscriber(
                 settings.openai_api_key,
@@ -1239,11 +1240,12 @@ class BotDouble:
                     "Пришлите текст для перевода или ответьте на сообщение с текстом."
                 )
                 return True
-            result = await self._run_assistant_task(
-                self._assistant_tasks.translate, payload, language
-            )
-            await self._send_intent_result(
-                message, f"Перевод на {language}:\n{result}"
+            await self._execute_assistant_task(
+                message,
+                self._assistant_tasks.translate,
+                payload,
+                language,
+                prefix=f"Перевод на {language}:",
             )
             return True
 
@@ -1258,10 +1260,12 @@ class BotDouble:
                     "Чтобы пересказать, ответьте на сообщение или укажите текст после двоеточия."
                 )
                 return True
-            result = await self._run_assistant_task(
-                self._assistant_tasks.summarize, payload
+            await self._execute_assistant_task(
+                message,
+                self._assistant_tasks.summarize,
+                payload,
+                prefix="Кратко:",
             )
-            await self._send_intent_result(message, f"Кратко:\n{result}")
             return True
 
         if any(token in cleaned_lower for token in ("перефраз", "формулир")):
@@ -1275,12 +1279,12 @@ class BotDouble:
                     "Добавьте текст для перефразирования или ответьте на сообщение."
                 )
                 return True
-            result = await self._run_assistant_task(
+            await self._execute_assistant_task(
+                message,
                 self._assistant_tasks.paraphrase,
                 payload,
                 "Перепиши текст своими словами, сохранив смысл.",
             )
-            await self._send_intent_result(message, result)
             return True
 
         if "исправь ошибки" in cleaned_lower or (
@@ -1296,10 +1300,11 @@ class BotDouble:
                     "Чтобы исправить ошибки, пришлите текст или ответьте на сообщение."
                 )
                 return True
-            result = await self._run_assistant_task(
-                self._assistant_tasks.proofread, payload
+            await self._execute_assistant_task(
+                message,
+                self._assistant_tasks.proofread,
+                payload,
             )
-            await self._send_intent_result(message, result)
             return True
 
         if "список" in cleaned_lower and "задач" in cleaned_lower:
@@ -1313,10 +1318,11 @@ class BotDouble:
                     "Чтобы составить список задач, ответьте на сообщение или добавьте текст после команды."
                 )
                 return True
-            result = await self._run_assistant_task(
-                self._assistant_tasks.listify, payload
+            await self._execute_assistant_task(
+                message,
+                self._assistant_tasks.listify,
+                payload,
             )
-            await self._send_intent_result(message, result)
             return True
 
         tone_instruction: Optional[str] = None
@@ -1357,10 +1363,12 @@ class BotDouble:
                     "Чтобы изменить тон, добавьте текст или ответьте на сообщение."
                 )
                 return True
-            result = await self._run_assistant_task(
-                self._assistant_tasks.paraphrase, payload, tone_instruction
+            await self._execute_assistant_task(
+                message,
+                self._assistant_tasks.paraphrase,
+                payload,
+                tone_instruction,
             )
-            await self._send_intent_result(message, result)
             return True
 
         if (
@@ -1378,13 +1386,32 @@ class BotDouble:
                     "Чтобы помочь с ответом, добавьте текст сообщения или ответьте на него."
                 )
                 return True
-            result = await self._run_assistant_task(
+            await self._execute_assistant_task(
+                message,
                 self._assistant_tasks.respond_helpfully,
                 payload,
-                "Ответь кратко и по существу."
+                "Ответь кратко и по существу.",
             )
-            await self._send_intent_result(message, result)
             return True
+
+        if (
+            reply_to_bot
+            and message.chat_id is not None
+            and message.from_user is not None
+        ):
+            key = (message.chat_id, message.from_user.id)
+            target_internal_id = self._recent_imitation_targets.get(key)
+            if target_internal_id:
+                row = await self._run_db(
+                    self._db.get_user_by_id, target_internal_id
+                )
+                if row is not None:
+                    payload = cleaned_instruction or stripped
+                    if payload and len(payload) >= 3:
+                        await self._handle_imitation_for_user(
+                            message, row, payload
+                        )
+                        return True
 
         return False
 
@@ -1498,12 +1525,30 @@ class BotDouble:
         result = await loop.run_in_executor(None, partial(func, *args))
         return result.text
 
-    async def _send_intent_result(self, message: Message, text: str) -> None:
-        text = text.strip()
+    async def _execute_assistant_task(
+        self,
+        message: Message,
+        func: Callable[..., TaskResult],
+        *args: object,
+        prefix: Optional[str] = None,
+    ) -> Optional[str]:
+        try:
+            result = await self._run_assistant_task(func, *args)
+        except Exception as exc:
+            LOGGER.exception("Assistant task failed", exc_info=exc)
+            await message.reply_text(
+                "Не удалось выполнить запрос к модели. Попробуйте ещё раз позже."
+            )
+            return None
+        text = result.strip()
         if not text:
-            await message.reply_text("Не удалось получить результат, попробуйте ещё раз.")
-            return
-        await message.reply_text(text, disable_web_page_preview=True)
+            await message.reply_text("Модель не вернула результат.")
+            return None
+        if prefix:
+            await message.reply_text(f"{prefix}\n{text}", disable_web_page_preview=True)
+        else:
+            await message.reply_text(text, disable_web_page_preview=True)
+        return text
 
     async def _handle_imitation_for_user(
         self, message: Message, user_row: sqlite3.Row, starter: str
@@ -1577,6 +1622,10 @@ class BotDouble:
             )
             return
         await message.reply_text(reply_text)
+        if message.chat_id is not None and message.from_user is not None:
+            self._recent_imitation_targets[
+                (message.chat_id, message.from_user.id)
+            ] = int(user_row["id"])
 
     async def _ensure_internal_user(self, user: Optional[User]) -> Optional[int]:
         if user is None:

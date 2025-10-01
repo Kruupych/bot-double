@@ -23,7 +23,7 @@ class AssistantTaskEngine:
             f"{text}\n\n"
             "Выведи только перевод."
         )
-        return self._run(prompt, temperature=0.2)
+        return self._run(prompt)
 
     def summarize(self, text: str) -> TaskResult:
         prompt = (
@@ -33,7 +33,7 @@ class AssistantTaskEngine:
             f"{text}\n\n"
             "Ответ:"
         )
-        return self._run(prompt, temperature=0.3)
+        return self._run(prompt)
 
     def paraphrase(self, text: str, instruction: str) -> TaskResult:
         prompt = (
@@ -41,7 +41,7 @@ class AssistantTaskEngine:
             "\n\nИнструкция:"
             f" {instruction}\n\nТекст:\n{text}\n\nОтвет:"
         )
-        return self._run(prompt, temperature=0.4)
+        return self._run(prompt)
 
     def proofread(self, text: str) -> TaskResult:
         prompt = (
@@ -49,7 +49,7 @@ class AssistantTaskEngine:
             " Исправь их и выведи отредактированную версию без пояснений.\n\nТекст:\n"
             f"{text}\n\nИсправленный текст:"
         )
-        return self._run(prompt, temperature=0.2)
+        return self._run(prompt)
 
     def listify(self, text: str) -> TaskResult:
         prompt = (
@@ -59,7 +59,7 @@ class AssistantTaskEngine:
             "\n\nТекст:\n"
             f"{text}\n\nСписок:"
         )
-        return self._run(prompt, temperature=0.4)
+        return self._run(prompt)
 
     def respond_helpfully(self, text: str, instruction: str) -> TaskResult:
         prompt = (
@@ -68,13 +68,12 @@ class AssistantTaskEngine:
             " Сохрани тон дружелюбным и естественным.\n\nСообщение:\n"
             f"{text}\n\nОтвет:"
         )
-        return self._run(prompt, temperature=0.5)
+        return self._run(prompt)
 
-    def _run(self, prompt: str, *, temperature: float) -> TaskResult:
+    def _run(self, prompt: str) -> TaskResult:
         response = self._client.responses.create(
             model=self._model,
             input=prompt,
-            temperature=temperature,
         )
         text = getattr(response, "output_text", "")
         return TaskResult(text=text.strip())
