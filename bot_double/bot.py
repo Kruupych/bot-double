@@ -1773,11 +1773,14 @@ class BotDouble:
         payload: Optional[str],
         persona_row: sqlite3.Row,
         persona_name: str,
+        descriptor: Optional[str],
     ) -> Optional[str]:
         if not payload:
             return None
         text = self._strip_call_signs(payload).strip()
-        text = self._remove_descriptor_mentions(text, None, persona_row, persona_name)
+        text = self._remove_descriptor_mentions(
+            text, descriptor, persona_row, persona_name
+        )
         return text or None
 
     def _extract_leading_descriptor(
@@ -1908,7 +1911,7 @@ class BotDouble:
                 candidates.append(cleaned_instruction)
         if payload:
             cleaned_payload = self._clean_imitation_payload(
-                payload, persona_row, persona_name
+                payload, persona_row, persona_name, descriptor
             )
             if cleaned_payload:
                 candidates.append(cleaned_payload)
@@ -1941,10 +1944,7 @@ class BotDouble:
 
     def _format_chain_prompt(self, chain: _ImitationChain) -> str:
         if not chain.messages:
-            return (
-                "Участник задаёт вопрос. Ответь в стиле выбранного пользователя и"
-                " поддержи диалог."
-            )
+            return "Ответь в стиле выбранного пользователя."  # safety fallback
         history_lines: List[str] = []
         for entry in chain.messages[:-1]:
             speaker = chain.persona_name if entry.is_persona else entry.speaker
@@ -1952,9 +1952,12 @@ class BotDouble:
                 speaker = f"{chain.persona_name} (ты)"
             history_lines.append(f"{speaker}: {entry.text}")
         current = chain.messages[-1]
+        continuation_hint = (
+            " и продолжи цепочку" if history_lines else ""
+        )
         current_line = (
             f"{current.speaker} пишет тебе: \"{current.text}\". Ответь как"
-            f" {chain.persona_name} от первого лица и продолжи цепочку."
+            f" {chain.persona_name} от первого лица{continuation_hint}."
         )
         if history_lines:
             return "Контекст цепочки:\n" + "\n".join(history_lines) + "\n\n" + current_line
