@@ -285,6 +285,7 @@ class BotDouble:
             user_row,
             message.from_user,
             user_text,
+            context_messages=self._collect_initial_context(message),
         )
         await self._handle_imitation_for_user(message, user_row, chain)
 
@@ -511,6 +512,7 @@ class BotDouble:
             user_row,
             message.from_user,
             user_text,
+            context_messages=self._collect_initial_context(message),
         )
         await self._handle_imitation_for_user(message, user_row, chain)
 
@@ -1338,6 +1340,7 @@ class BotDouble:
                 resolved_row,
                 message.from_user,
                 user_text,
+                context_messages=self._collect_initial_context(message),
             )
             await self._handle_imitation_for_user(
                 message, resolved_row, chain
@@ -1588,6 +1591,7 @@ class BotDouble:
             resolved_row,
             message.from_user,
             user_text,
+            context_messages=self._collect_initial_context(message),
         )
         await self._handle_imitation_for_user(message, resolved_row, chain)
         return True
@@ -1616,19 +1620,12 @@ class BotDouble:
             )
             if persona_row is None or message.chat_id is None:
                 return False
-            persona_name = display_name(
-                persona_row["username"],
-                persona_row["first_name"],
-                persona_row["last_name"],
-            )
-            chain_source = _ImitationChain(
-                chat_id=message.chat_id,
-                persona_id=int(persona_row["id"]),
-                persona_username=persona_row["username"],
-                persona_first_name=persona_row["first_name"],
-                persona_last_name=persona_row["last_name"],
-                persona_name=persona_name,
-                messages=[],
+            chain_source = self._create_chain(
+                message.chat_id,
+                persona_row,
+                message.from_user,
+                "",
+                context_messages=self._collect_initial_context(message),
             )
         else:
             return False
@@ -1963,12 +1960,47 @@ class BotDouble:
             return "Контекст цепочки:\n" + "\n".join(history_lines) + "\n\n" + current_line
         return current_line
 
+    def _collect_initial_context(
+        self, message: Message, *, max_depth: int = 6
+    ) -> List[_ChainMessage]:
+        context: List[_ChainMessage] = []
+        current = message.reply_to_message
+        depth = 0
+        trail: List[_ChainMessage] = []
+        while current is not None and depth < max_depth:
+            text = current.text or current.caption or ""
+            text = text.strip()
+            if text:
+                normalized = self._normalize_chain_text(text)
+                if normalized:
+                    from_user = current.from_user
+                    speaker = "Участник"
+                    if from_user is not None:
+                        speaker = display_name(
+                            from_user.username,
+                            from_user.first_name,
+                            from_user.last_name,
+                        )
+                    trail.append(
+                        _ChainMessage(
+                            speaker=speaker,
+                            text=normalized,
+                            is_persona=False,
+                        )
+                    )
+            depth += 1
+            current = current.reply_to_message
+        context.extend(reversed(trail))
+        return context
+
     def _create_chain(
         self,
         chat_id: int,
         persona_row: sqlite3.Row,
         requester: Optional[User],
         user_text: str,
+        *,
+        context_messages: Optional[List[_ChainMessage]] = None,
     ) -> _ImitationChain:
         persona_name = display_name(
             persona_row["username"],
@@ -1984,6 +2016,18 @@ class BotDouble:
             persona_name=persona_name,
             messages=[],
         )
+        if context_messages:
+            for entry in context_messages:
+                normalized = self._normalize_chain_text(entry.text)
+                if not normalized:
+                    continue
+                chain.messages.append(
+                    _ChainMessage(
+                        speaker=entry.speaker,
+                        text=normalized,
+                        is_persona=entry.is_persona,
+                    )
+                )
         requester_name = "Собеседник"
         if requester is not None:
             requester_name = display_name(
