@@ -1130,6 +1130,8 @@ class BotDouble:
                 descriptor, payload = self._split_imitation_remainder(remainder)
             if not descriptor:
                 descriptor = self._descriptor_from_prefix(instruction[:idx])
+            if payload is None and trigger == "что бы сказал" and remainder:
+                payload = remainder
             if descriptor:
                 return descriptor, payload
         return None
@@ -1423,10 +1425,19 @@ class BotDouble:
                     self._db.get_user_by_id, target_internal_id
                 )
                 if row is not None:
-                    payload = cleaned_instruction or stripped
+                    descriptor = cleaned_instruction or stripped
+                    payload = self._extract_payload(
+                        message,
+                        cleaned_instruction,
+                        keywords=["й", "соглас", "ответ", "скажи"],
+                    )
+                    if not payload:
+                        payload = self._extract_reply_text(message)
+                    if not payload:
+                        payload = descriptor
                     if payload and len(payload) >= 3:
                         await self._handle_imitation_for_user(
-                            message, row, payload
+                            message, row, payload.strip()
                         )
                         return True
 
