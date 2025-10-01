@@ -393,6 +393,14 @@ class BotDouble:
 
         await message.reply_text(ai_reply)
 
+    async def on_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        chat = update.effective_chat
+        if message is None or chat is None or message.from_user is None:
+            return
+
+        await self._capture_message(message)
+
     async def on_new_members(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
         chat = update.effective_chat
@@ -1795,6 +1803,7 @@ def run_bot(settings: Settings) -> None:
     application.add_handler(CommandHandler("me", bot.profile_command))
     application.add_handler(CommandHandler("forgetme", bot.forget_me))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, bot.on_new_members))
+    application.add_handler(MessageHandler(filters.VOICE, bot.on_voice_message))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.on_text_message))
 
     application.run_polling(close_loop=False)
