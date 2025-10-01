@@ -1165,6 +1165,10 @@ class BotDouble:
             return descriptor, payload
         like_match = re.search(r"как\s+([^,.;\n]+)", instruction, re.IGNORECASE)
         if like_match:
+            prefix_lower = instruction[: like_match.start()].lower()
+            trigger_hints = ("имитируй", "ответ", "скажи", "напиши", "говори")
+            if not any(hint in prefix_lower for hint in trigger_hints):
+                return None
             descriptor_raw = like_match.group(1).strip()
             descriptor_tokens = descriptor_raw.split()
             descriptor = descriptor_tokens[0] if descriptor_tokens else descriptor_raw
