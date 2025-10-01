@@ -882,3 +882,41 @@ class Database:
             self._conn.execute("DELETE FROM messages WHERE user_id = ?", (user_id,))
             self._conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
             return True
+
+    def reset_user_data(self, telegram_id: int) -> bool:
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "SELECT id FROM users WHERE telegram_id = ?",
+                (telegram_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return False
+            user_id = int(row["id"])
+            # purge personal messages
+            self._conn.execute("DELETE FROM messages WHERE user_id = ?", (user_id,))
+            # purge pair interactions and their messages where user is speaker or target
+            self._conn.execute(
+                "DELETE FROM pair_interaction_messages WHERE speaker_id = ? OR target_id = ?",
+                (user_id, user_id),
+            )
+            self._conn.execute(
+                "DELETE FROM pair_interactions WHERE speaker_id = ? OR target_id = ?",
+                (user_id, user_id),
+            )
+            # purge persona profile
+            self._conn.execute(
+                "DELETE FROM persona_profiles WHERE user_id = ?",
+                (user_id,),
+            )
+            # purge any aliases for the user across chats
+            self._conn.execute(
+                "DELETE FROM user_aliases WHERE user_id = ?",
+                (user_id,),
+            )
+            # purge persona preference if exists
+            self._conn.execute(
+                "DELETE FROM persona_preferences WHERE user_id = ?",
+                (user_id,),
+            )
+            return True

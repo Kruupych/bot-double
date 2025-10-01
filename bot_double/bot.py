@@ -3251,9 +3251,14 @@ class BotDouble:
         message = update.effective_message
         if message is None or message.from_user is None:
             return
-        deleted = await self._run_db(self._db.delete_user_data, message.from_user.id)
-        if deleted:
-            await message.reply_text("Ваши сообщения и профиль удалены. Я забуду вас.")
+        reset = await self._run_db(self._db.reset_user_data, message.from_user.id)
+        # invalidate alias caches globally, since aliases удалены во всех чатах
+        self._alias_cache.clear()
+        self._alias_display_cache.clear()
+        if reset:
+            await message.reply_text(
+                "Ваши сообщения, связи и карточка персоны удалены. Я буду заново собирать ваш стиль с новых сообщений."
+            )
         else:
             await message.reply_text("У меня не было сохранённых данных о вас.")
 
