@@ -1124,9 +1124,12 @@ class BotDouble:
             if idx == -1:
                 continue
             remainder = instruction[idx + len(trigger) :].strip()
-            if not remainder:
-                continue
-            descriptor, payload = self._split_imitation_remainder(remainder)
+            descriptor: Optional[str] = None
+            payload: Optional[str] = None
+            if remainder:
+                descriptor, payload = self._split_imitation_remainder(remainder)
+            if not descriptor:
+                descriptor = self._descriptor_from_prefix(instruction[:idx])
             if descriptor:
                 return descriptor, payload
         return None
@@ -1149,6 +1152,20 @@ class BotDouble:
                 if descriptor:
                     return descriptor, payload
         return remainder.strip(), None
+
+    def _descriptor_from_prefix(self, prefix: str) -> Optional[str]:
+        prefix = prefix.strip()
+        if not prefix:
+            return None
+        if "@" in prefix:
+            match = re.findall(r"@([\w_]{3,})", prefix)
+            if match:
+                return "@" + match[-1]
+        sentences = re.split(r"[.!?]\s*", prefix)
+        tail = sentences[-1].strip() if sentences else prefix
+        fragments = re.split(r"[:;,\-–—\n]", tail)
+        descriptor = fragments[-1].strip() if fragments else tail
+        return descriptor or None
 
     async def _maybe_handle_intent(
         self, message: Message, text: str, from_voice: bool
