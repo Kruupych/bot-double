@@ -30,6 +30,7 @@ from .assistant_tasks import AssistantTaskEngine, TaskResult
 from .burst_manager import BurstManager, BurstState
 from .config import Settings
 from .db import Database
+from .imitation import ChainMessage, ImitationChain, ImitationToolkit
 from .style_engine import (
     ContextMessage,
     DialogueParticipant,
@@ -65,24 +66,6 @@ class _ChatEvent:
     timestamp: int
     user_telegram_id: int
     reply_to_telegram_id: Optional[int]
-
-
-@dataclass
-class _ChainMessage:
-    speaker: str
-    text: str
-    is_persona: bool
-
-
-@dataclass
-class _ImitationChain:
-    chat_id: int
-    persona_id: int
-    persona_username: Optional[str]
-    persona_first_name: Optional[str]
-    persona_last_name: Optional[str]
-    persona_name: str
-    messages: List[_ChainMessage]
 
 
 _CYR_TO_LAT = {
@@ -170,11 +153,12 @@ class BotDouble:
         self._transcriber: Optional[SpeechTranscriber] = None
         self._assistant_tasks: Optional[AssistantTaskEngine] = None
         self._recent_imitation_targets: Dict[Tuple[int, int], int] = {}
-        self._chain_by_message: Dict[Tuple[int, int], _ImitationChain] = {}
-        self._last_chain_by_user: Dict[Tuple[int, int], _ImitationChain] = {}
-        self._chain_cache_limit = 500
-        self._answered_messages: Dict[Tuple[int, int], int] = {}
-        self._answered_cache_limit = 1000
+        self._imitation = ImitationToolkit(
+            bot_name=self._bot_name,
+            bot_username=self._bot_username,
+            chain_cache_limit=500,
+            answered_cache_limit=1000,
+        )
         if self._settings.enable_voice_transcription:
             self._transcriber = SpeechTranscriber(
                 settings.openai_api_key,
@@ -202,6 +186,9 @@ class BotDouble:
         self._bot_id = me.id
         self._bot_name = me.first_name or self._bot_name
         self._bot_username = me.username
+        self._imitation.update_bot_identity(
+            bot_name=self._bot_name, bot_username=self._bot_username
+        )
         try:
             self._bot_user_id = await self._run_db(
                 self._db.upsert_user,
@@ -263,7 +250,7 @@ class BotDouble:
         )
         descriptor = f"@{username}"
         instruction_source = starter or message.text or ""
-        user_text = self._prepare_chain_user_text(
+        user_text = self._imitation.prepare_chain_user_text(
             instruction=instruction_source,
             payload=starter or None,
             descriptor=descriptor,
@@ -276,12 +263,12 @@ class BotDouble:
                 "Нужен текст для имитации — добавьте подсказку после команды."
             )
             return
-        chain = self._create_chain(
+        chain = self._imitation.create_chain(
             chat.id,
             user_row,
             message.from_user,
             user_text,
-            context_messages=self._collect_initial_context(message),
+            context_messages=self._imitation.collect_initial_context(message),
         )
         await self._handle_imitation_for_user(message, user_row, chain)
 
@@ -526,7 +513,7 @@ class BotDouble:
             user_row["first_name"],
             user_row["last_name"],
         )
-        user_text = self._prepare_chain_user_text(
+        user_text = self._imitation.prepare_chain_user_text(
             instruction=starter,
             payload=starter,
             descriptor=None,
@@ -536,12 +523,12 @@ class BotDouble:
         )
         if not user_text:
             user_text = "Продолжи разговор."
-        chain = self._create_chain(
+        chain = self._imitation.create_chain(
             chat.id,
             user_row,
             message.from_user,
             user_text,
-            context_messages=self._collect_initial_context(message),
+            context_messages=self._imitation.collect_initial_context(message),
         )
         await self._handle_imitation_for_user(message, user_row, chain)
 
@@ -1178,9 +1165,13 @@ class BotDouble:
             descriptor: Optional[str] = None
             payload: Optional[str] = None
             if remainder:
-                descriptor, payload = self._split_imitation_remainder(remainder)
+                descriptor, payload = self._imitation.split_imitation_remainder(
+                    remainder
+                )
             if not descriptor:
-                descriptor = self._descriptor_from_prefix(instruction[:idx])
+                descriptor = self._imitation.descriptor_from_prefix(
+                    instruction[:idx]
+                )
             if payload is None and trigger == "что бы сказал" and remainder:
                 payload = remainder
             if descriptor:
@@ -1213,497 +1204,6 @@ class BotDouble:
             return descriptor, (payload or None)
         return None
 
-    def _split_imitation_remainder(
-        self, remainder: str
-    ) -> Tuple[Optional[str], Optional[str]]:
-        if not remainder:
-            return None, None
-        if remainder.startswith("@"):
-            parts = remainder.split(None, 1)
-            descriptor = parts[0]
-            payload = parts[1].strip() if len(parts) > 1 else None
-            return descriptor, payload
-        for delimiter in [":", "—", "–", "-", "\n", ","]:
-            idx = remainder.find(delimiter)
-            if idx != -1:
-                descriptor = remainder[:idx].strip()
-                payload = remainder[idx + 1 :].strip() or None
-                if descriptor:
-                    return descriptor, payload
-        remainder = remainder.strip()
-        if not remainder:
-            return None, None
-        parts = remainder.split(None, 1)
-        descriptor = parts[0].strip(".,!?-—:;")
-        payload = parts[1].strip() if len(parts) > 1 else None
-        return descriptor or None, payload
-
-    def _descriptor_from_prefix(self, prefix: str) -> Optional[str]:
-        prefix = prefix.strip()
-        if not prefix:
-            return None
-        if "@" in prefix:
-            match = re.findall(r"@([\w_]{3,})", prefix)
-            if match:
-                return "@" + match[-1]
-        sentences = re.split(r"[.!?]\s*", prefix)
-        tail = sentences[-1].strip() if sentences else prefix
-        fragments = re.split(r"[:;,\-–—\n]", tail)
-        descriptor = fragments[-1].strip() if fragments else tail
-        return descriptor or None
-
-    async def _maybe_handle_intent(
-        self, message: Message, text: str, from_voice: bool
-    ) -> bool:
-        if not self._settings.enable_freeform_intents or self._assistant_tasks is None:
-            return False
-        stripped = text.strip()
-        if not stripped:
-            return False
-
-        lowered = stripped.lower()
-        direct_address = self._is_direct_address(message, lowered)
-        reply_to_bot = (
-            message.reply_to_message
-            and message.reply_to_message.from_user
-            and self._bot_id is not None
-            and message.reply_to_message.from_user.id == self._bot_id
-        )
-        reply_chain: Optional[_ImitationChain] = None
-        if (
-            reply_to_bot
-            and message.reply_to_message
-            and message.chat_id is not None
-        ):
-            reply_chain = self._chain_by_message.get(
-                (message.chat_id, message.reply_to_message.message_id)
-            )
-            if reply_chain and message.from_user is not None:
-                self._recent_imitation_targets[
-                    (message.chat_id, message.from_user.id)
-                ] = reply_chain.persona_id
-
-        cleaned_instruction = self._strip_call_signs(stripped)
-        cleaned_lower = cleaned_instruction.lower()
-        continuation_chain: Optional[_ImitationChain] = reply_chain
-        followup_target_id: Optional[int] = None
-        if continuation_chain is not None:
-            followup_target_id = continuation_chain.persona_id
-        elif message.chat_id is not None and message.from_user is not None:
-            followup_target_id = self._recent_imitation_targets.get(
-                (message.chat_id, message.from_user.id)
-            )
-
-        imitation_request = self._parse_imitation_request(cleaned_instruction)
-        if imitation_request:
-            descriptor, inline_payload = imitation_request
-            resolved_row, suggestions = await self._resolve_user_descriptor(
-                message.chat_id, descriptor
-            )
-            if resolved_row is None:
-                if suggestions:
-                    lines = [
-                        "Не уверена, кого имитировать. Возможные варианты:",
-                    ]
-                    alias_display = {}
-                    if message.chat is not None:
-                        _, alias_display = await self._get_alias_maps(message.chat.id)
-                    for candidate, score in suggestions:
-                        name = display_name(
-                            candidate["username"],
-                            candidate["first_name"],
-                            candidate["last_name"],
-                        )
-                        username = candidate["username"]
-                        handle = f"@{username}" if username else name
-                        aliases = alias_display.get(int(candidate["id"]), [])
-                        alias_hint = (
-                            f" (алиасы: {', '.join(aliases)})" if aliases else ""
-                        )
-                        lines.append(f"• {handle}{alias_hint}")
-                    lines.append(
-                        "Уточните имя или создайте прозвища через /alias @username ..."
-                    )
-                    await message.reply_text("\n".join(lines))
-                else:
-                    await message.reply_text(
-                        "Не могу понять, кого имитировать. Используйте @username или добавьте алиас через /alias."
-                    )
-                return True
-
-            payload = inline_payload or self._extract_payload(
-                message,
-                cleaned_instruction,
-                keywords=["имитируй", "ответь как", "что бы сказал"],
-            )
-            if not payload:
-                payload = self._extract_reply_text(message)
-            if not payload:
-                await message.reply_text(
-                    "Нужен текст для имитации — добавьте подсказку или ответьте на сообщение."
-                )
-                return True
-            persona_name = display_name(
-                resolved_row["username"],
-                resolved_row["first_name"],
-                resolved_row["last_name"],
-            )
-            user_text = self._prepare_chain_user_text(
-                instruction=cleaned_instruction or stripped,
-                payload=payload,
-                descriptor=descriptor,
-                persona_row=resolved_row,
-                persona_name=persona_name,
-                message=message,
-            )
-            if not user_text:
-                await message.reply_text(
-                    "Нужен текст для имитации — добавьте подсказку или ответьте на сообщение."
-                )
-                return True
-            chat_id = message.chat_id
-            if chat_id is None:
-                return True
-            chain = self._create_chain(
-                chat_id,
-                resolved_row,
-                message.from_user,
-                user_text,
-                context_messages=self._collect_initial_context(message),
-            )
-            await self._handle_imitation_for_user(
-                message, resolved_row, chain
-            )
-            return True
-
-        if (
-            continuation_chain is not None
-            and (reply_to_bot or not self._should_skip_chain(cleaned_lower))
-            and await self._handle_followup_imitation(
-                message,
-                cleaned_instruction,
-                cleaned_lower,
-                stripped,
-                continuation_chain,
-                reply_to_bot,
-                followup_target_id,
-            )
-        ):
-            return True
-
-        if direct_address:
-            handled = await self._handle_implicit_imitation(
-                message,
-                cleaned_instruction,
-                stripped,
-            )
-            if handled:
-                return True
-
-        if not direct_address and not reply_to_bot and message.chat.type != "private":
-            return False
-
-        payload: Optional[str]
-
-        if any(token in cleaned_lower for token in ("переведи", "translate")):
-            language = self._parse_language(cleaned_lower)
-            payload = self._extract_payload(
-                message, cleaned_instruction, keywords=["переведи", "translate"]
-            )
-            if not payload:
-                await message.reply_text(
-                    "Пришлите текст для перевода или ответьте на сообщение с текстом."
-                )
-                return True
-            await self._execute_assistant_task(
-                message,
-                self._assistant_tasks.translate,
-                payload,
-                language,
-                prefix=f"Перевод на {language}:",
-            )
-            return True
-
-        if any(token in cleaned_lower for token in ("перескажи", "резюмируй", "кратко")):
-            payload = self._extract_payload(
-                message,
-                cleaned_instruction,
-                keywords=["перескаж", "резюмируй", "кратко"],
-            )
-            if not payload:
-                await message.reply_text(
-                    "Чтобы пересказать, ответьте на сообщение или укажите текст после двоеточия."
-                )
-                return True
-            await self._execute_assistant_task(
-                message,
-                self._assistant_tasks.summarize,
-                payload,
-                prefix="Кратко:",
-            )
-            return True
-
-        if any(token in cleaned_lower for token in ("перефраз", "формулир")):
-            payload = self._extract_payload(
-                message,
-                cleaned_instruction,
-                keywords=["перефраз", "сформулируй", "формулир"],
-            )
-            if not payload:
-                await message.reply_text(
-                    "Добавьте текст для перефразирования или ответьте на сообщение."
-                )
-                return True
-            await self._execute_assistant_task(
-                message,
-                self._assistant_tasks.paraphrase,
-                payload,
-                "Перепиши текст своими словами, сохранив смысл.",
-            )
-            return True
-
-        if "исправь ошибки" in cleaned_lower or (
-            "провер" in cleaned_lower and "ошиб" in cleaned_lower
-        ):
-            payload = self._extract_payload(
-                message,
-                cleaned_instruction,
-                keywords=["исправь", "проверь", "ошиб"],
-            )
-            if not payload:
-                await message.reply_text(
-                    "Чтобы исправить ошибки, пришлите текст или ответьте на сообщение."
-                )
-                return True
-            await self._execute_assistant_task(
-                message,
-                self._assistant_tasks.proofread,
-                payload,
-            )
-            return True
-
-        if "список" in cleaned_lower and "задач" in cleaned_lower:
-            payload = self._extract_payload(
-                message,
-                cleaned_instruction,
-                keywords=["список", "задач", "сделай"],
-            )
-            if not payload:
-                await message.reply_text(
-                    "Чтобы составить список задач, ответьте на сообщение или добавьте текст после команды."
-                )
-                return True
-            await self._execute_assistant_task(
-                message,
-                self._assistant_tasks.listify,
-                payload,
-            )
-            return True
-
-        tone_instruction: Optional[str] = None
-        if "вежлив" in cleaned_lower:
-            tone_instruction = "Сделай текст вежливым и уважительным."
-        elif "официал" in cleaned_lower:
-            tone_instruction = "Сделай текст официальным и деловым."
-        elif "дружелюб" in cleaned_lower:
-            tone_instruction = "Сделай текст дружелюбным и тёплым."
-        elif "токсич" in cleaned_lower:
-            tone_instruction = "Убери токсичность и агрессию, сделай нейтральным."
-        elif "добавь" in cleaned_lower and (
-            "смай" in cleaned_lower or "эмодз" in cleaned_lower
-        ):
-            tone_instruction = "Добавь немного уместных эмодзи."
-        elif "убери" in cleaned_lower and (
-            "смай" in cleaned_lower or "эмодз" in cleaned_lower
-        ):
-            tone_instruction = "Убери эмодзи и сделай текст нейтральным."
-
-        if tone_instruction:
-            payload = self._extract_payload(
-                message,
-                cleaned_instruction,
-                keywords=[
-                    "сделай",
-                    "убери",
-                    "добавь",
-                    "вежлив",
-                    "дружелюб",
-                    "токсич",
-                    "эмодз",
-                    "смай",
-                ],
-            )
-            if not payload:
-                await message.reply_text(
-                    "Чтобы изменить тон, добавьте текст или ответьте на сообщение."
-                )
-                return True
-            await self._execute_assistant_task(
-                message,
-                self._assistant_tasks.paraphrase,
-                payload,
-                tone_instruction,
-            )
-            return True
-
-        if (
-            ("что ответить" in cleaned_lower)
-            or ("сформулируй ответ" in cleaned_lower)
-            or ("помоги ответить" in cleaned_lower)
-        ):
-            payload = self._extract_payload(
-                message,
-                cleaned_instruction,
-                keywords=["что ответить", "сформулируй", "ответ"],
-            )
-            if not payload:
-                await message.reply_text(
-                    "Чтобы помочь с ответом, добавьте текст сообщения или ответьте на него."
-                )
-                return True
-            await self._execute_assistant_task(
-                message,
-                self._assistant_tasks.respond_helpfully,
-                payload,
-                "Ответь кратко и по существу.",
-            )
-            return True
-
-        if direct_address and "?" in stripped and len(stripped) >= 3:
-            await self._execute_assistant_task(
-                message,
-                self._assistant_tasks.respond_helpfully,
-                stripped,
-                "Ответь честно и по-человечески.",
-            )
-            return True
-
-        return False
-
-    async def _handle_implicit_imitation(
-        self,
-        message: Message,
-        cleaned_instruction: str,
-        stripped: str,
-    ) -> bool:
-        chat = message.chat
-        if chat is None:
-            return False
-        descriptor, remainder = self._extract_leading_descriptor(cleaned_instruction)
-        if not descriptor:
-            return False
-        resolved_row, suggestions = await self._resolve_user_descriptor(
-            chat.id, descriptor
-        )
-        if resolved_row is None:
-            return False
-        payload = remainder or self._extract_payload(
-            message, cleaned_instruction
-        )
-        persona_name = display_name(
-            resolved_row["username"],
-            resolved_row["first_name"],
-            resolved_row["last_name"],
-        )
-        user_text = self._prepare_chain_user_text(
-            instruction=cleaned_instruction or stripped,
-            payload=payload,
-            descriptor=descriptor,
-            persona_row=resolved_row,
-            persona_name=persona_name,
-            message=message,
-        )
-        if not user_text:
-            return False
-        chain = self._create_chain(
-            chat.id,
-            resolved_row,
-            message.from_user,
-            user_text,
-            context_messages=self._collect_initial_context(message),
-        )
-        await self._handle_imitation_for_user(message, resolved_row, chain)
-        return True
-
-    async def _handle_followup_imitation(
-        self,
-        message: Message,
-        cleaned_instruction: str,
-        cleaned_lower: str,
-        stripped: str,
-        base_chain: Optional[_ImitationChain],
-        reply_to_bot: bool,
-        fallback_persona_id: Optional[int],
-    ) -> bool:
-        chain_source = base_chain
-        persona_row: Optional[sqlite3.Row] = None
-        if chain_source is not None:
-            persona_row = await self._run_db(
-                self._db.get_user_by_id, chain_source.persona_id
-            )
-            if persona_row is None:
-                return False
-        elif fallback_persona_id is not None and reply_to_bot:
-            persona_row = await self._run_db(
-                self._db.get_user_by_id, fallback_persona_id
-            )
-            if persona_row is None or message.chat_id is None:
-                return False
-            chain_source = self._create_chain(
-                message.chat_id,
-                persona_row,
-                message.from_user,
-                "",
-                context_messages=self._collect_initial_context(message),
-            )
-        else:
-            return False
-
-        persona_name = chain_source.persona_name
-        followup_markers = (
-            "соглас",
-            "подроб",
-            "добав",
-            "продолж",
-            "опиши",
-            "расска",
-            "скажи",
-            "ответ",
-            "согласись",
-            "подтверди",
-        )
-
-        if not reply_to_bot and not any(marker in cleaned_lower for marker in followup_markers):
-            return False
-
-        payload = self._extract_payload(
-            message,
-            cleaned_instruction,
-            keywords=["имитируй", "ответ", "скажи", "соглас"],
-        )
-        user_text = self._prepare_chain_user_text(
-            instruction=cleaned_instruction,
-            payload=payload,
-            descriptor=None,
-            persona_row=persona_row,
-            persona_name=persona_name,
-            message=message,
-        )
-        if not user_text and message.text:
-            user_text = self._normalize_chain_text(
-                self._strip_call_signs(message.text)
-            )
-        if not user_text:
-            reply_text = self._extract_reply_text(message)
-            if reply_text:
-                user_text = self._normalize_chain_text(reply_text)
-        if not user_text:
-            return False
-
-        chain = self._branch_chain(chain_source, message.from_user, user_text)
-        await self._handle_imitation_for_user(message, persona_row, chain)
-        return True
-
     def _is_direct_address(self, message: Message, lowered_text: str) -> bool:
         chat = message.chat
         if chat and chat.type == "private":
@@ -1727,422 +1227,6 @@ class BotDouble:
         if "бот-двойник" in lowered_text:
             return True
         return False
-
-    def _strip_call_signs(self, text: str) -> str:
-        patterns = [r"^бот[:,\s]*", r"^двойник[:,\s]*"]
-        if self._bot_username:
-            patterns.append(rf"@{re.escape(self._bot_username)}")
-        if self._bot_name:
-            patterns.append(re.escape(self._bot_name))
-        cleaned = text
-        for pattern in patterns:
-            cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
-        return re.sub(r"\s+", " ", cleaned).strip()
-
-    def _extract_reply_text(self, message: Message) -> Optional[str]:
-        reply = message.reply_to_message
-        if reply is None:
-            return None
-        if reply.text:
-            return reply.text.strip()
-        if reply.caption:
-            return reply.caption.strip()
-        return None
-
-    def _extract_payload(
-        self, message: Message, text: str, *, keywords: Optional[List[str]] = None
-    ) -> Optional[str]:
-        inline = self._text_after_delimiter(text)
-        if inline:
-            return inline
-        quoted = self._text_in_quotes(text)
-        if quoted:
-            return quoted
-        cleaned = text
-        if keywords:
-            for keyword in keywords:
-                pattern = re.compile(keyword, re.IGNORECASE)
-                match = pattern.search(cleaned)
-                if match:
-                    cleaned = cleaned[match.end() :]
-        cleaned = self._strip_call_signs(cleaned).strip(" ,\n-—")
-        if cleaned:
-            return cleaned
-        reply_text = self._extract_reply_text(message)
-        if reply_text:
-            return reply_text
-        return None
-
-    def _text_after_delimiter(self, text: str) -> Optional[str]:
-        for delimiter in (":", "—", "–"):
-            if delimiter in text:
-                candidate = text.split(delimiter, 1)[1].strip()
-                if candidate:
-                    return candidate
-        if "\n" in text:
-            tail = text.split("\n", 1)[1].strip()
-            if tail:
-                return tail
-        return None
-
-    def _text_in_quotes(self, text: str) -> Optional[str]:
-        match = re.search(r'["«](.+?)["»]', text)
-        if match:
-            return match.group(1).strip()
-        return None
-
-    def _clean_imitation_instruction(
-        self,
-        instruction: Optional[str],
-        descriptor: Optional[str],
-        persona_row: sqlite3.Row,
-        persona_name: str,
-    ) -> Optional[str]:
-        if not instruction:
-            return None
-        text = self._strip_call_signs(instruction).strip()
-        text = self._strip_command_prefix(text)
-        text = self._remove_descriptor_mentions(
-            text, descriptor, persona_row, persona_name
-        )
-        return text or None
-
-    def _clean_imitation_payload(
-        self,
-        payload: Optional[str],
-        persona_row: sqlite3.Row,
-        persona_name: str,
-        descriptor: Optional[str],
-    ) -> Optional[str]:
-        if not payload:
-            return None
-        text = self._strip_call_signs(payload).strip()
-        text = self._remove_descriptor_mentions(
-            text, descriptor, persona_row, persona_name
-        )
-        return text or None
-
-    def _extract_leading_descriptor(
-        self, instruction: str
-    ) -> Tuple[Optional[str], Optional[str]]:
-        text = instruction.strip()
-        if not text:
-            return None, None
-        text = text.lstrip(",:;—- ")
-        if not text:
-            return None, None
-        match = re.match(r"^(@?[\w\-]+)", text)
-        if not match:
-            return None, None
-        descriptor = match.group(1)
-        remainder = text[match.end() :].lstrip(" ,:;—-")
-        return descriptor, (remainder or None)
-
-    def _strip_command_prefix(self, text: str) -> str:
-        lowered = text.lower()
-        prefixes = (
-            "имитируй",
-            "ответь",
-            "расскажи",
-            "скажи",
-            "напиши",
-            "сформулируй",
-            "подскажи",
-            "опиши",
-        )
-        for prefix in prefixes:
-            if lowered.startswith(prefix):
-                remainder = text[len(prefix) :].lstrip(" ,:-")
-                return remainder or text
-        return text
-
-    def _remove_descriptor_mentions(
-        self,
-        text: str,
-        descriptor: Optional[str],
-        persona_row: sqlite3.Row,
-        persona_name: str,
-    ) -> str:
-        tokens: Set[str] = set()
-        if descriptor:
-            tokens.add(descriptor)
-            plain_descriptor = descriptor.replace("@", "").strip()
-            if plain_descriptor:
-                tokens.add(plain_descriptor)
-        if persona_name:
-            tokens.add(persona_name)
-            tokens.update(persona_name.split())
-        first_name = (persona_row["first_name"] or "").strip()
-        if first_name:
-            tokens.add(first_name)
-        username = persona_row["username"]
-        if username:
-            tokens.add(username)
-            tokens.add(f"@{username}")
-
-        for token in sorted(tokens, key=len, reverse=True):
-            if not token:
-                continue
-            pattern_call = rf"(?i)\bкак\s+{re.escape(token)}\b"
-            text = re.sub(pattern_call, "", text)
-            pattern_leading = rf"(?i)^\s*{re.escape(token)}([\s,.:;!?\-—]+)"
-            text = re.sub(pattern_leading, "", text)
-        text = re.sub(r"\s{2,}", " ", text)
-        return text.strip(" ,:-")
-
-    def _clone_chain(self, chain: _ImitationChain) -> _ImitationChain:
-        return _ImitationChain(
-            chat_id=chain.chat_id,
-            persona_id=chain.persona_id,
-            persona_username=chain.persona_username,
-            persona_first_name=chain.persona_first_name,
-            persona_last_name=chain.persona_last_name,
-            persona_name=chain.persona_name,
-            messages=[
-                _ChainMessage(
-                    speaker=msg.speaker,
-                    text=msg.text,
-                    is_persona=msg.is_persona,
-                )
-                for msg in chain.messages
-            ],
-        )
-
-    def _register_chain_reference(
-        self, chat_id: int, message_id: int, chain: _ImitationChain
-    ) -> None:
-        key = (chat_id, message_id)
-        self._chain_by_message[key] = self._clone_chain(chain)
-        if len(self._chain_by_message) > self._chain_cache_limit:
-            oldest_key = next(iter(self._chain_by_message))
-            if oldest_key != key:
-                self._chain_by_message.pop(oldest_key, None)
-
-    def _remember_chain_for_user(
-        self, chat_id: int, user_id: int, chain: _ImitationChain
-    ) -> None:
-        key = (chat_id, user_id)
-        self._last_chain_by_user[key] = self._clone_chain(chain)
-        if len(self._last_chain_by_user) > self._chain_cache_limit:
-            oldest_key = next(iter(self._last_chain_by_user))
-            if oldest_key != key:
-                self._last_chain_by_user.pop(oldest_key, None)
-
-    def _reserve_answer_slot(self, message: Message) -> bool:
-        chat_id = message.chat_id
-        message_id = getattr(message, "message_id", None)
-        if chat_id is None or message_id is None:
-            return True
-        key = (chat_id, int(message_id))
-        if key in self._answered_messages:
-            return False
-        self._answered_messages[key] = int(time.time())
-        if len(self._answered_messages) > self._answered_cache_limit:
-            oldest_key = next(iter(self._answered_messages))
-            if oldest_key != key:
-                self._answered_messages.pop(oldest_key, None)
-        return True
-
-    def _normalize_chain_text(self, text: str) -> str:
-        return re.sub(r"\s+", " ", text).strip()
-
-    def _prepare_chain_user_text(
-        self,
-        *,
-        instruction: Optional[str],
-        payload: Optional[str],
-        descriptor: Optional[str],
-        persona_row: sqlite3.Row,
-        persona_name: str,
-        message: Message,
-    ) -> Optional[str]:
-        candidates: List[str] = []
-        if instruction:
-            cleaned_instruction = self._clean_imitation_instruction(
-                instruction, descriptor, persona_row, persona_name
-            )
-            if cleaned_instruction:
-                candidates.append(cleaned_instruction)
-        if payload:
-            cleaned_payload = self._clean_imitation_payload(
-                payload, persona_row, persona_name, descriptor
-            )
-            if cleaned_payload:
-                candidates.append(cleaned_payload)
-        original = message.text or message.caption or ""
-        if original:
-            stripped_original = self._strip_call_signs(original)
-            stripped_original = self._remove_descriptor_mentions(
-                stripped_original, descriptor, persona_row, persona_name
-            )
-            stripped_original = stripped_original.strip()
-            if stripped_original:
-                stripped_original = self._strip_command_prefix(stripped_original)
-                stripped_original = self._remove_descriptor_mentions(
-                    stripped_original, descriptor, persona_row, persona_name
-                )
-                candidates.append(stripped_original)
-        unique: List[str] = []
-        seen: Set[str] = set()
-        for candidate in candidates:
-            normalized = self._normalize_chain_text(candidate)
-            if not normalized:
-                continue
-            if normalized.startswith("/"):
-                continue
-            key = normalized.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            unique.append(normalized)
-        if unique:
-            return "\n".join(unique)
-        return None
-
-    def _format_chain_prompt(self, chain: _ImitationChain) -> str:
-        if not chain.messages:
-            return "Ответь в стиле выбранного пользователя."  # safety fallback
-        history_lines: List[str] = []
-        for entry in chain.messages[:-1]:
-            speaker = chain.persona_name if entry.is_persona else entry.speaker
-            if entry.is_persona:
-                speaker = f"{chain.persona_name} (ты)"
-            history_lines.append(f"{speaker}: {entry.text}")
-        current = chain.messages[-1]
-        continuation_hint = " и продолжи цепочку" if history_lines else ""
-        current_line = (
-            f"{current.speaker} пишет тебе (боту, имитирующему человека): \"{current.text}\"."
-            f" Ответь в стиле {chain.persona_name} от первого лица{continuation_hint}."
-        )
-        if history_lines:
-            return "Контекст цепочки:\n" + "\n".join(history_lines) + "\n\n" + current_line
-        return current_line
-
-    def _collect_initial_context(
-        self, message: Message, *, max_depth: int = 6
-    ) -> List[_ChainMessage]:
-        context: List[_ChainMessage] = []
-        current = message.reply_to_message
-        depth = 0
-        trail: List[_ChainMessage] = []
-        while current is not None and depth < max_depth:
-            text = current.text or current.caption or ""
-            text = text.strip()
-            if text:
-                normalized = self._normalize_chain_text(text)
-                if normalized:
-                    from_user = current.from_user
-                    speaker = "Участник"
-                    if from_user is not None:
-                        speaker = display_name(
-                            from_user.username,
-                            from_user.first_name,
-                            from_user.last_name,
-                        )
-                    trail.append(
-                        _ChainMessage(
-                            speaker=speaker,
-                            text=normalized,
-                            is_persona=False,
-                        )
-                    )
-            depth += 1
-            current = current.reply_to_message
-        context.extend(reversed(trail))
-        return context
-
-    def _create_chain(
-        self,
-        chat_id: int,
-        persona_row: sqlite3.Row,
-        requester: Optional[User],
-        user_text: str,
-        *,
-        context_messages: Optional[List[_ChainMessage]] = None,
-    ) -> _ImitationChain:
-        persona_name = display_name(
-            persona_row["username"],
-            persona_row["first_name"],
-            persona_row["last_name"],
-        )
-        chain = _ImitationChain(
-            chat_id=chat_id,
-            persona_id=int(persona_row["id"]),
-            persona_username=persona_row["username"],
-            persona_first_name=persona_row["first_name"],
-            persona_last_name=persona_row["last_name"],
-            persona_name=persona_name,
-            messages=[],
-        )
-        if context_messages:
-            for entry in context_messages:
-                normalized = self._normalize_chain_text(entry.text)
-                if not normalized:
-                    continue
-                chain.messages.append(
-                    _ChainMessage(
-                        speaker=entry.speaker,
-                        text=normalized,
-                        is_persona=entry.is_persona,
-                    )
-                )
-        requester_name = "Собеседник"
-        if requester is not None:
-            requester_name = display_name(
-                requester.username, requester.first_name, requester.last_name
-            )
-        normalized = self._normalize_chain_text(user_text)
-        if normalized:
-            chain.messages.append(
-                _ChainMessage(
-                    speaker=requester_name,
-                    text=normalized,
-                    is_persona=False,
-                )
-            )
-        return chain
-
-    def _branch_chain(
-        self,
-        base_chain: _ImitationChain,
-        requester: Optional[User],
-        user_text: str,
-    ) -> _ImitationChain:
-        chain = self._clone_chain(base_chain)
-        requester_name = "Собеседник"
-        if requester is not None:
-            requester_name = display_name(
-                requester.username, requester.first_name, requester.last_name
-            )
-        normalized = self._normalize_chain_text(user_text)
-        if normalized:
-            chain.messages.append(
-                _ChainMessage(
-                    speaker=requester_name,
-                    text=normalized,
-                    is_persona=False,
-                )
-            )
-        return chain
-
-    def _should_skip_chain(self, cleaned_lower: str) -> bool:
-        control_tokens = (
-            "имитируй",
-            "ответь как",
-            "что бы сказал",
-            "переведи",
-            "translate",
-            "перескажи",
-            "резюмируй",
-            "кратко",
-            "перефраз",
-            "формулир",
-            "исправь",
-            "ошиб",
-            "список",
-            "задач",
-        )
-        return any(token in cleaned_lower for token in control_tokens)
 
     def _truncate_for_storage(self, text: str) -> str:
         try:
@@ -2199,7 +1283,7 @@ class BotDouble:
         *args: object,
         prefix: Optional[str] = None,
     ) -> Optional[str]:
-        if not self._reserve_answer_slot(message):
+        if not self._imitation.reserve_answer_slot(message):
             return None
         try:
             result = await self._run_assistant_task(func, *args)
@@ -2220,9 +1304,9 @@ class BotDouble:
         return text
 
     async def _handle_imitation_for_user(
-        self, message: Message, user_row: sqlite3.Row, chain: _ImitationChain
+        self, message: Message, user_row: sqlite3.Row, chain: ImitationChain
     ) -> None:
-        if not self._reserve_answer_slot(message):
+        if not self._imitation.reserve_answer_slot(message):
             return
         chat = message.chat
         if chat is None:
@@ -2272,7 +1356,7 @@ class BotDouble:
             addressee_internal_id,
             addressee_name,
         )
-        starter = self._format_chain_prompt(chain)
+        starter = self._imitation.format_chain_prompt(chain)
         try:
             reply_text = await self._generate_reply(
                 user_row["username"] or "",
@@ -2293,10 +1377,10 @@ class BotDouble:
                 "Не удалось сгенерировать ответ. Попробуйте позже или уточните подсказку."
             )
             return
-        normalized_reply = self._normalize_chain_text(reply_text)
+        normalized_reply = self._imitation.normalize_chain_text(reply_text)
         if normalized_reply:
             chain.messages.append(
-                _ChainMessage(
+                ChainMessage(
                     speaker=chain.persona_name,
                     text=normalized_reply,
                     is_persona=True,
@@ -2309,9 +1393,13 @@ class BotDouble:
                 (message.chat_id, message.from_user.id)
             ] = persona_id
         if message.chat_id is not None and bot_reply is not None:
-            self._register_chain_reference(message.chat_id, bot_reply.message_id, chain)
+            self._imitation.register_chain_reference(
+                message.chat_id, bot_reply.message_id, chain
+            )
         if message.chat_id is not None and message.from_user is not None:
-            self._remember_chain_for_user(message.chat_id, message.from_user.id, chain)
+            self._imitation.remember_chain_for_user(
+                message.chat_id, message.from_user.id, chain
+            )
 
     async def _ensure_internal_user(self, user: Optional[User]) -> Optional[int]:
         if user is None:
