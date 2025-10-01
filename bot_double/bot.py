@@ -1223,7 +1223,7 @@ class BotDouble:
             )
             return None
         try:
-            file = await message.get_file()
+            file = await voice.get_file()
             buffer = io.BytesIO()
             await file.download_to_memory(out=buffer)
         except Exception:
