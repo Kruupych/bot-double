@@ -1150,6 +1150,21 @@ class BotDouble:
                 payload = remainder
             if descriptor:
                 return descriptor, payload
+        # Patterns like "от лица Тимофей" or "как Тимофей"
+        role_match = re.search(r"от лица\s+([^,.;\n]+)", instruction, re.IGNORECASE)
+        if role_match:
+            descriptor = role_match.group(1).strip()
+            payload = (
+                (instruction[: role_match.start()].strip())
+                + " "
+                + instruction[role_match.end() :].strip()
+            ).strip()
+            payload = payload or None
+            return descriptor, payload
+        like_match = re.search(r"как\s+([^,.;\n]+)", instruction, re.IGNORECASE)
+        if like_match:
+            descriptor = like_match.group(1).strip()
+            return descriptor, instruction.strip()
         return None
 
     def _split_imitation_remainder(
@@ -1429,11 +1444,20 @@ class BotDouble:
             )
             return True
 
-        if (
-            reply_to_bot
-            and message.chat_id is not None
-            and message.from_user is not None
-        ):
+        followup_markers = (
+            "соглас",
+            "подроб",
+            "добав",
+            "продолж",
+            "опиши",
+            "расска",
+            "скажи",
+            "ответ",
+            "согласись",
+            "подтверди",
+        )
+
+        if message.chat_id is not None and message.from_user is not None:
             key = (message.chat_id, message.from_user.id)
             target_internal_id = self._recent_imitation_targets.get(key)
             if target_internal_id:
@@ -1451,7 +1475,11 @@ class BotDouble:
                         payload = self._extract_reply_text(message)
                     if not payload:
                         payload = descriptor
-                    if payload and len(payload) >= 3:
+                    if (
+                        payload
+                        and len(payload) >= 3
+                        and (reply_to_bot or any(marker in cleaned_lower for marker in followup_markers))
+                    ):
                         await self._handle_imitation_for_user(
                             message, row, payload.strip()
                         )
