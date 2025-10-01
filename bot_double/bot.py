@@ -1240,6 +1240,12 @@ class BotDouble:
         cleaned_instruction = self._strip_call_signs(stripped)
         cleaned_lower = cleaned_instruction.lower()
 
+        followup_target_id: Optional[int] = None
+        if message.chat_id is not None and message.from_user is not None:
+            followup_target_id = self._recent_imitation_targets.get(
+                (message.chat_id, message.from_user.id)
+            )
+
         imitation_request = self._parse_imitation_request(cleaned_instruction)
         if imitation_request:
             descriptor, inline_payload = imitation_request
@@ -1299,6 +1305,20 @@ class BotDouble:
             await self._handle_imitation_for_user(
                 message, resolved_row, starter
             )
+            return True
+
+        if (
+            followup_target_id is not None
+            and not self._should_skip_chain(cleaned_lower)
+            and await self._handle_followup_imitation(
+                message,
+                cleaned_instruction,
+                cleaned_lower,
+                stripped,
+                followup_target_id,
+                reply_to_bot,
+            )
+        ):
             return True
 
         if direct_address:
@@ -1479,54 +1499,6 @@ class BotDouble:
             )
             return True
 
-        followup_markers = (
-            "соглас",
-            "подроб",
-            "добав",
-            "продолж",
-            "опиши",
-            "расска",
-            "скажи",
-            "ответ",
-            "согласись",
-            "подтверди",
-        )
-
-        if message.chat_id is not None and message.from_user is not None:
-            key = (message.chat_id, message.from_user.id)
-            target_internal_id = self._recent_imitation_targets.get(key)
-            if target_internal_id:
-                row = await self._run_db(
-                    self._db.get_user_by_id, target_internal_id
-                )
-                if row is not None:
-                    descriptor = cleaned_instruction or stripped
-                    payload = self._extract_payload(
-                        message,
-                        cleaned_instruction,
-                        keywords=["й", "соглас", "ответ", "скажи"],
-                    )
-                    if not payload:
-                        payload = self._extract_reply_text(message)
-                    if not payload:
-                        payload = descriptor
-                    if (
-                        payload
-                        and len(payload) >= 3
-                        and (reply_to_bot or any(marker in cleaned_lower for marker in followup_markers))
-                    ):
-                        starter = self._build_imitation_starter(
-                            base_payload=payload,
-                            instruction=cleaned_instruction or stripped,
-                            descriptor=None,
-                            persona_row=row,
-                            message=message,
-                        )
-                        await self._handle_imitation_for_user(
-                            message, row, starter
-                        )
-                        return True
-
         if direct_address and "?" in stripped and len(stripped) >= 3:
             await self._execute_assistant_task(
                 message,
@@ -1564,6 +1536,61 @@ class BotDouble:
             message=message,
         )
         await self._handle_imitation_for_user(message, resolved_row, starter)
+        return True
+
+    async def _handle_followup_imitation(
+        self,
+        message: Message,
+        cleaned_instruction: str,
+        cleaned_lower: str,
+        stripped: str,
+        target_internal_id: int,
+        reply_to_bot: bool,
+    ) -> bool:
+        row = await self._run_db(self._db.get_user_by_id, target_internal_id)
+        if row is None:
+            if message.chat_id is not None and message.from_user is not None:
+                self._recent_imitation_targets.pop(
+                    (message.chat_id, message.from_user.id), None
+                )
+            return False
+
+        followup_markers = (
+            "соглас",
+            "подроб",
+            "добав",
+            "продолж",
+            "опиши",
+            "расска",
+            "скажи",
+            "ответ",
+            "согласись",
+            "подтверди",
+        )
+
+        if not (reply_to_bot or any(marker in cleaned_lower for marker in followup_markers)):
+            return False
+
+        payload = self._extract_payload(
+            message,
+            cleaned_instruction,
+            keywords=["имитируй", "ответ", "скажи", "соглас"],
+        )
+        if not payload:
+            payload = self._extract_reply_text(message)
+        if not payload:
+            payload = stripped
+        if not payload or len(payload) < 3:
+            return False
+
+        starter = self._build_imitation_starter(
+            base_payload=payload,
+            instruction=cleaned_instruction or stripped,
+            descriptor=None,
+            persona_row=row,
+            message=message,
+        )
+        await self._handle_imitation_for_user(message, row, starter)
         return True
 
     def _is_direct_address(self, message: Message, lowered_text: str) -> bool:
@@ -1782,6 +1809,25 @@ class BotDouble:
             text = re.sub(pattern_leading, "", text)
         text = re.sub(r"\s{2,}", " ", text)
         return text.strip(" ,:-")
+
+    def _should_skip_chain(self, cleaned_lower: str) -> bool:
+        control_tokens = (
+            "имитируй",
+            "ответь как",
+            "что бы сказал",
+            "переведи",
+            "translate",
+            "перескажи",
+            "резюмируй",
+            "кратко",
+            "перефраз",
+            "формулир",
+            "исправь",
+            "ошиб",
+            "список",
+            "задач",
+        )
+        return any(token in cleaned_lower for token in control_tokens)
 
     def _parse_language(self, lowered_text: str) -> str:
         language_hints = {
