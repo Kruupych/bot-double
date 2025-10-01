@@ -1249,14 +1249,6 @@ class BotDouble:
         cleaned_instruction = self._strip_call_signs(stripped)
         cleaned_lower = cleaned_instruction.lower()
         continuation_chain: Optional[_ImitationChain] = reply_chain
-        if (
-            continuation_chain is None
-            and message.chat_id is not None
-            and message.from_user is not None
-        ):
-            continuation_chain = self._last_chain_by_user.get(
-                (message.chat_id, message.from_user.id)
-            )
         followup_target_id: Optional[int] = None
         if continuation_chain is not None:
             followup_target_id = continuation_chain.persona_id
@@ -1614,7 +1606,7 @@ class BotDouble:
             )
             if persona_row is None:
                 return False
-        elif fallback_persona_id is not None:
+        elif fallback_persona_id is not None and reply_to_bot:
             persona_row = await self._run_db(
                 self._db.get_user_by_id, fallback_persona_id
             )
@@ -1644,7 +1636,7 @@ class BotDouble:
             "подтверди",
         )
 
-        if not (reply_to_bot or any(marker in cleaned_lower for marker in followup_markers)):
+        if not reply_to_bot and not any(marker in cleaned_lower for marker in followup_markers):
             return False
 
         payload = self._extract_payload(
