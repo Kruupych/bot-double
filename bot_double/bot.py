@@ -1660,6 +1660,14 @@ class BotDouble:
             persona_name=persona_name,
             message=message,
         )
+        if not user_text and message.text:
+            user_text = self._normalize_chain_text(
+                self._strip_call_signs(message.text)
+            )
+        if not user_text:
+            reply_text = self._extract_reply_text(message)
+            if reply_text:
+                user_text = self._normalize_chain_text(reply_text)
         if not user_text:
             return False
 
