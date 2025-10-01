@@ -1485,6 +1485,15 @@ class BotDouble:
                         )
                         return True
 
+        if direct_address and "?" in stripped and len(stripped) >= 3:
+            await self._execute_assistant_task(
+                message,
+                self._assistant_tasks.respond_helpfully,
+                stripped,
+                "Ответь честно и по-человечески.",
+            )
+            return True
+
         return False
 
     def _is_direct_address(self, message: Message, lowered_text: str) -> bool:
