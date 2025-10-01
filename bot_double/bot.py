@@ -1571,9 +1571,6 @@ class BotDouble:
         quoted = self._text_in_quotes(text)
         if quoted:
             return quoted
-        reply_text = self._extract_reply_text(message)
-        if reply_text:
-            return reply_text
         cleaned = text
         if keywords:
             for keyword in keywords:
@@ -1582,7 +1579,12 @@ class BotDouble:
                 if match:
                     cleaned = cleaned[match.end() :]
         cleaned = self._strip_call_signs(cleaned).strip(" ,\n-—")
-        return cleaned or None
+        if cleaned:
+            return cleaned
+        reply_text = self._extract_reply_text(message)
+        if reply_text:
+            return reply_text
+        return None
 
     def _text_after_delimiter(self, text: str) -> Optional[str]:
         for delimiter in (":", "—", "–"):
