@@ -27,6 +27,7 @@ from telegram.ext import (
 )
 
 from .assistant_tasks import AssistantTaskEngine, TaskResult
+from .burst_manager import BurstManager, BurstState
 from .config import Settings
 from .db import Database
 from .style_engine import (
@@ -64,19 +65,6 @@ class _ChatEvent:
     timestamp: int
     user_telegram_id: int
     reply_to_telegram_id: Optional[int]
-
-
-@dataclass
-class _BurstState:
-    chat_id: int
-    user_id: int
-    user_telegram_id: int
-    texts: List[str]
-    start_timestamp: int
-    last_timestamp: int
-    last_message: Message
-    total_chars: int
-    task: Optional[asyncio.Task] = None
 
 
 @dataclass
@@ -164,8 +152,11 @@ class BotDouble:
         self._bot_name: str = "Бот-Двойник"
         self._bot_username: Optional[str] = None
         self._bot_user_id: Optional[int] = None
-        self._burst_states: Dict[Tuple[int, int], "_BurstState"] = {}
-        self._buffer_lock = asyncio.Lock()
+        self._burst_manager = BurstManager(
+            settings,
+            should_break=self._should_break_burst,
+            flush_callback=self._store_burst,
+        )
         self._chat_events: Dict[int, Deque[_ChatEvent]] = {}
         self._chat_events_maxlen = 50
         self._analysis_queue: Optional[asyncio.Queue[Tuple[int, int, int]]] = None
@@ -184,7 +175,6 @@ class BotDouble:
         self._chain_cache_limit = 500
         self._answered_messages: Dict[Tuple[int, int], int] = {}
         self._answered_cache_limit = 1000
-        self._burst_watchdog_task: Optional[asyncio.Task] = None
         if self._settings.enable_voice_transcription:
             self._transcriber = SpeechTranscriber(
                 settings.openai_api_key,
@@ -234,19 +224,12 @@ class BotDouble:
         if self._persona_analyzer is not None and self._persona_worker is None:
             self._persona_worker = asyncio.create_task(self._persona_analysis_worker())
         # Start a watchdog to flush stale bursts in case timers are cancelled
-        if self._settings.enable_bursts and self._burst_watchdog_task is None:
-            self._burst_watchdog_task = asyncio.create_task(self._burst_watchdog())
+        self._burst_manager.start()
 
     async def _post_shutdown(self, application: Application) -> None:
         LOGGER.info("Bot shutting down")
         await self._flush_all_buffers()
-        if self._burst_watchdog_task is not None:
-            self._burst_watchdog_task.cancel()
-            try:
-                await self._burst_watchdog_task
-            except asyncio.CancelledError:
-                pass
-            self._burst_watchdog_task = None
+        await self._burst_manager.stop()
         await self._stop_analysis_worker()
         await self._stop_persona_worker()
         self._db.close()
@@ -2521,85 +2504,17 @@ class BotDouble:
         text: str,
         timestamp: int,
     ) -> None:
-        normalized = text.strip()
-        if not normalized:
-            await self._flush_buffer_for_key(key)
-            return
-
         chat_id = message.chat_id
         if chat_id is None:
             return
-
-        buffer_to_flush: Optional[_BurstState] = None
-        flush_now = False
-        async with self._buffer_lock:
-            burst = self._burst_states.get(key)
-            if burst:
-                if self._should_break_burst(
-                    burst, message, user_telegram_id, timestamp
-                ):
-                    buffer_to_flush = self._burst_states.pop(key)
-                    if burst.task:
-                        burst.task.cancel()
-                    burst = None
-            if burst is None:
-                burst = _BurstState(
-                    chat_id=chat_id,
-                    user_id=user_internal_id,
-                    user_telegram_id=user_telegram_id,
-                    texts=[normalized],
-                    start_timestamp=timestamp,
-                    last_timestamp=timestamp,
-                    last_message=message,
-                    total_chars=len(normalized),
-                )
-                self._burst_states[key] = burst
-            else:
-                burst.texts.append(normalized)
-                burst.last_timestamp = timestamp
-                burst.last_message = message
-                burst.total_chars += len(normalized)
-            if burst.task:
-                burst.task.cancel()
-            burst.task = asyncio.create_task(self._delayed_flush(key))
-            flush_now = self._burst_limits_exceeded(burst)
-
-        if buffer_to_flush is not None:
-            await self._store_burst(buffer_to_flush)
-
-        if flush_now:
-            await self._flush_buffer_for_key(key)
-
-    async def _delayed_flush(self, key: Tuple[int, int]) -> None:
-        try:
-            await asyncio.sleep(self._settings.burst_inactivity_seconds)
-            await self._flush_buffer_for_key(key)
-        except asyncio.CancelledError:  # pragma: no cover - cooperative cancel
-            return
+        await self._burst_manager.append(
+            key, message, user_internal_id, user_telegram_id, text, timestamp
+        )
 
     async def _flush_buffer_for_key(self, key: Tuple[int, int]) -> None:
-        burst = await self._pop_burst_for_key(key)
-        if burst is None:
-            return
-        await self._store_burst(burst)
+        await self._burst_manager.flush_key(key)
 
-    async def _pop_burst_for_key(self, key: Tuple[int, int]) -> Optional[_BurstState]:
-        async with self._buffer_lock:
-            burst = self._burst_states.get(key)
-            if not burst or not burst.texts:
-                if burst and burst.task:
-                    burst.task.cancel()
-                    burst.task = None
-                if burst:
-                    del self._burst_states[key]
-                return None
-            if burst.task:
-                burst.task.cancel()
-                burst.task = None
-            del self._burst_states[key]
-            return burst
-
-    async def _store_burst(self, burst: _BurstState) -> None:
+    async def _store_burst(self, burst: BurstState) -> None:
         combined_text = " ".join(burst.texts).strip()
         if not combined_text:
             return
@@ -2625,7 +2540,7 @@ class BotDouble:
 
     def _should_break_burst(
         self,
-        burst: _BurstState,
+        burst: BurstState,
         message: Message,
         user_telegram_id: int,
         timestamp: int,
@@ -2647,19 +2562,6 @@ class BotDouble:
             burst.last_timestamp,
             timestamp,
             reply_to_id,
-        ):
-            return True
-        return False
-
-    def _burst_limits_exceeded(self, burst: _BurstState) -> bool:
-        if (
-            self._settings.burst_max_parts > 0
-            and len(burst.texts) >= self._settings.burst_max_parts
-        ):
-            return True
-        if (
-            self._settings.burst_max_chars > 0
-            and burst.total_chars >= self._settings.burst_max_chars
         ):
             return True
         return False
@@ -2768,43 +2670,10 @@ class BotDouble:
         return text
 
     async def _flush_all_buffers(self) -> None:
-        async with self._buffer_lock:
-            keys = list(self._burst_states.keys())
-        for key in keys:
-            await self._flush_buffer_for_key(key)
+        await self._burst_manager.flush_all()
 
     async def _flush_buffers_for_chat(self, chat_id: int) -> None:
-        to_flush: list[tuple[int, int]] = []
-        async with self._buffer_lock:
-            for key, burst in self._burst_states.items():
-                if burst.chat_id == chat_id:
-                    to_flush.append(key)
-        for key in to_flush:
-            await self._flush_buffer_for_key(key)
-
-    async def _burst_watchdog(self) -> None:
-        try:
-            while True:
-                await asyncio.sleep(5)
-                if not self._settings.enable_bursts:
-                    continue
-                now = int(time.time())
-                keys_to_flush: list[tuple[int, int]] = []
-                inactivity = max(self._settings.burst_inactivity_seconds, 5)
-                max_age = max(self._settings.burst_max_duration_seconds, 0)
-                async with self._buffer_lock:
-                    for key, burst in self._burst_states.items():
-                        if not burst.texts:
-                            continue
-                        if now - burst.last_timestamp >= inactivity * 2:
-                            keys_to_flush.append(key)
-                            continue
-                        if max_age > 0 and (now - burst.start_timestamp) > max_age + inactivity:
-                            keys_to_flush.append(key)
-                for key in keys_to_flush:
-                    await self._flush_buffer_for_key(key)
-        except asyncio.CancelledError:
-            return
+        await self._burst_manager.flush_for_chat(chat_id)
 
     async def _generate_reply(
         self,
