@@ -1345,7 +1345,7 @@ class BotDouble:
 
         if (
             continuation_chain is not None
-            and not self._should_skip_chain(cleaned_lower)
+            and (reply_to_bot or not self._should_skip_chain(cleaned_lower))
             and await self._handle_followup_imitation(
                 message,
                 cleaned_instruction,
