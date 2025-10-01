@@ -27,7 +27,13 @@ class Settings:
     min_tokens_to_store: int = 3
     peer_profile_count: int = 3
     peer_profile_samples: int = 2
-    short_message_buffer_seconds: int = 10
+    burst_inactivity_seconds: int = 10
+    burst_gap_seconds: int = 12
+    burst_max_duration_seconds: int = 90
+    burst_max_parts: int = 6
+    burst_max_chars: int = 2000
+    turn_window_seconds: int = 10
+    enable_bursts: bool = True
     relationship_analysis_model: Optional[str] = None
     relationship_analysis_min_pending: int = 5
     relationship_analysis_min_hours: int = 24
@@ -63,6 +69,18 @@ def _get_env_int(name: str, default: int, *, minimum: Optional[int] = None) -> i
     if minimum is not None and value < minimum:
         raise SettingsError(f"Environment variable {name} must be >= {minimum}")
     return value
+
+
+def _get_env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    lowered = raw.strip().lower()
+    if lowered in {"1", "true", "yes", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "off"}:
+        return False
+    raise SettingsError(f"Environment variable {name} must be a boolean value")
 
 
 def load_settings() -> Settings:
@@ -106,6 +124,17 @@ def load_settings() -> Settings:
     peer_profile_samples = _get_env_int("PEER_PROFILE_SAMPLES", 2, minimum=0)
     min_tokens_to_store = _get_env_int("MIN_TOKENS_TO_STORE", 3, minimum=1)
     short_buffer_seconds = _get_env_int("SHORT_MESSAGE_BUFFER_SECONDS", 10, minimum=1)
+    burst_inactivity_seconds = _get_env_int(
+        "BURST_INACTIVITY_SECONDS", short_buffer_seconds, minimum=1
+    )
+    burst_gap_seconds = _get_env_int("BURST_GAP_SECONDS", 12, minimum=1)
+    burst_max_duration_seconds = _get_env_int(
+        "BURST_MAX_DURATION_SECONDS", 90, minimum=0
+    )
+    burst_max_parts = _get_env_int("BURST_MAX_PARTS", 6, minimum=1)
+    burst_max_chars = _get_env_int("BURST_MAX_CHARS", 2000, minimum=0)
+    turn_window_seconds = _get_env_int("TURN_WINDOW_SECONDS", 10, minimum=1)
+    enable_bursts = _get_env_bool("ENABLE_BURSTS", True)
     rel_model = os.getenv("RELATIONSHIP_ANALYSIS_MODEL")
     rel_min_pending = _get_env_int("RELATIONSHIP_ANALYSIS_MIN_PENDING", 5, minimum=1)
     rel_min_hours = _get_env_int("RELATIONSHIP_ANALYSIS_MIN_HOURS", 24, minimum=0)
@@ -143,7 +172,13 @@ def load_settings() -> Settings:
         min_tokens_to_store=min_tokens_to_store,
         peer_profile_count=peer_profile_count,
         peer_profile_samples=peer_profile_samples,
-        short_message_buffer_seconds=short_buffer_seconds,
+        burst_inactivity_seconds=burst_inactivity_seconds,
+        burst_gap_seconds=burst_gap_seconds,
+        burst_max_duration_seconds=burst_max_duration_seconds,
+        burst_max_parts=burst_max_parts,
+        burst_max_chars=burst_max_chars,
+        turn_window_seconds=turn_window_seconds,
+        enable_bursts=enable_bursts,
         relationship_analysis_model=rel_model,
         relationship_analysis_min_pending=rel_min_pending,
         relationship_analysis_min_hours=rel_min_hours,

@@ -6,9 +6,10 @@ import logging
 import random
 import re
 import time
+from collections import deque
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TypeVar
+from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple, TypeVar
 
 from telegram import Message, MessageEntity, Update, User
 from telegram.constants import ParseMode
@@ -53,12 +54,22 @@ T = TypeVar("T")
 
 
 @dataclass
-class _PendingBuffer:
+class _ChatEvent:
+    timestamp: int
+    user_telegram_id: int
+    reply_to_telegram_id: Optional[int]
+
+
+@dataclass
+class _BurstState:
     chat_id: int
     user_id: int
+    user_telegram_id: int
     texts: List[str]
+    start_timestamp: int
     last_timestamp: int
     last_message: Message
+    total_chars: int
     task: Optional[asyncio.Task] = None
 
 
@@ -91,8 +102,10 @@ class BotDouble:
         self._bot_id: Optional[int] = None
         self._bot_name: str = "Бот-Двойник"
         self._bot_user_id: Optional[int] = None
-        self._message_buffers: Dict[Tuple[int, int], "_PendingBuffer"] = {}
+        self._burst_states: Dict[Tuple[int, int], "_BurstState"] = {}
         self._buffer_lock = asyncio.Lock()
+        self._chat_events: Dict[int, Deque[_ChatEvent]] = {}
+        self._chat_events_maxlen = 50
         self._analysis_queue: Optional[asyncio.Queue[Tuple[int, int, int]]] = None
         self._analysis_inflight: Set[Tuple[int, int, int]] = set()
         self._analysis_worker: Optional[asyncio.Task] = None
@@ -619,6 +632,9 @@ class BotDouble:
             return
         if message.forward_origin is not None:
             return
+        chat_id = message.chat_id
+        if chat_id is None:
+            return
         user_id = await self._run_db(
             self._db.upsert_user,
             user.id,
@@ -629,31 +645,29 @@ class BotDouble:
         if user.is_bot and user.id == self._bot_id:
             self._bot_user_id = user_id
         timestamp = int(message.date.timestamp())
+        key = (chat_id, user_id)
+
         should_store = should_store_message(
             message,
             min_tokens=self._settings.min_tokens_to_store,
             allowed_bot_id=self._bot_id,
         )
+        bufferable = is_bufferable_message(
+            message,
+            allowed_bot_id=self._bot_id,
+        )
 
-        stored_text: Optional[str] = None
-
-        key = (message.chat_id, user_id)
-        if should_store:
-            await self._flush_buffer_for_key(key)
-            await self._run_db(
-                self._db.store_message,
-                message.chat_id,
+        if should_store or bufferable:
+            await self._append_to_burst(
+                key,
+                message,
                 user_id,
+                user.id,
                 text,
                 timestamp,
-                context_only=False,
             )
-            stored_text = text
-        elif is_bufferable_message(
-            message, allowed_bot_id=self._bot_id
-        ):
-            await self._buffer_short_message(key, message, user_id, text, timestamp)
-            return
+        else:
+            await self._flush_buffer_for_key(key)
 
         context_snippet = self._extract_command_context(text)
         if context_snippet and should_store_context_snippet(
@@ -668,9 +682,7 @@ class BotDouble:
                 context_only=True,
             )
 
-        if stored_text:
-            await self._update_pair_interactions(message, user_id, stored_text)
-            await self._note_persona_message(message.chat_id, user_id, timestamp)
+        self._record_chat_event(message, timestamp)
 
     def _extract_command_context(self, text: str) -> Optional[str]:
         stripped = text.strip()
@@ -951,64 +963,95 @@ class BotDouble:
         await self._persona_queue.put(key)
         self._persona_inflight.add(key)
 
-    async def _buffer_short_message(
+    async def _append_to_burst(
         self,
         key: Tuple[int, int],
         message: Message,
-        user_id: int,
+        user_internal_id: int,
+        user_telegram_id: int,
         text: str,
         timestamp: int,
     ) -> None:
+        normalized = text.strip()
+        if not normalized:
+            await self._flush_buffer_for_key(key)
+            return
+
         chat_id = message.chat_id
         if chat_id is None:
             return
-        normalized = text.strip()
-        if not normalized:
-            return
+
+        buffer_to_flush: Optional[_BurstState] = None
+        flush_now = False
         async with self._buffer_lock:
-            buffer = self._message_buffers.get(key)
-            if buffer is None:
-                buffer = _PendingBuffer(
+            burst = self._burst_states.get(key)
+            if burst:
+                if self._should_break_burst(
+                    burst, message, user_telegram_id, timestamp
+                ):
+                    buffer_to_flush = self._burst_states.pop(key)
+                    if burst.task:
+                        burst.task.cancel()
+                    burst = None
+            if burst is None:
+                burst = _BurstState(
                     chat_id=chat_id,
-                    user_id=user_id,
+                    user_id=user_internal_id,
+                    user_telegram_id=user_telegram_id,
                     texts=[normalized],
+                    start_timestamp=timestamp,
                     last_timestamp=timestamp,
                     last_message=message,
+                    total_chars=len(normalized),
                 )
-                self._message_buffers[key] = buffer
+                self._burst_states[key] = burst
             else:
-                buffer.texts.append(normalized)
-                buffer.last_timestamp = timestamp
-                buffer.last_message = message
-                if buffer.task:
-                    buffer.task.cancel()
-            buffer.task = asyncio.create_task(self._delayed_flush(key))
+                burst.texts.append(normalized)
+                burst.last_timestamp = timestamp
+                burst.last_message = message
+                burst.total_chars += len(normalized)
+            if burst.task:
+                burst.task.cancel()
+            burst.task = asyncio.create_task(self._delayed_flush(key))
+            flush_now = self._burst_limits_exceeded(burst)
+
+        if buffer_to_flush is not None:
+            await self._store_burst(buffer_to_flush)
+
+        if flush_now:
+            await self._flush_buffer_for_key(key)
 
     async def _delayed_flush(self, key: Tuple[int, int]) -> None:
         try:
-            await asyncio.sleep(self._settings.short_message_buffer_seconds)
+            await asyncio.sleep(self._settings.burst_inactivity_seconds)
             await self._flush_buffer_for_key(key)
         except asyncio.CancelledError:  # pragma: no cover - cooperative cancel
             return
 
     async def _flush_buffer_for_key(self, key: Tuple[int, int]) -> None:
-        async with self._buffer_lock:
-            buffer = self._message_buffers.get(key)
-            if not buffer or not buffer.texts:
-                if buffer and buffer.task:
-                    buffer.task.cancel()
-                    buffer.task = None
-                return
-            if buffer.task:
-                buffer.task.cancel()
-                buffer.task = None
-            combined_text = " ".join(buffer.texts).strip()
-            last_message = buffer.last_message
-            timestamp = buffer.last_timestamp
-            chat_id = buffer.chat_id
-            user_id = buffer.user_id
-            del self._message_buffers[key]
+        burst = await self._pop_burst_for_key(key)
+        if burst is None:
+            return
+        await self._store_burst(burst)
 
+    async def _pop_burst_for_key(self, key: Tuple[int, int]) -> Optional[_BurstState]:
+        async with self._buffer_lock:
+            burst = self._burst_states.get(key)
+            if not burst or not burst.texts:
+                if burst and burst.task:
+                    burst.task.cancel()
+                    burst.task = None
+                if burst:
+                    del self._burst_states[key]
+                return None
+            if burst.task:
+                burst.task.cancel()
+                burst.task = None
+            del self._burst_states[key]
+            return burst
+
+    async def _store_burst(self, burst: _BurstState) -> None:
+        combined_text = " ".join(burst.texts).strip()
         if not combined_text:
             return
         if not should_store_context_snippet(
@@ -1018,18 +1061,115 @@ class BotDouble:
 
         await self._run_db(
             self._db.store_message,
-            chat_id,
-            user_id,
+            burst.chat_id,
+            burst.user_id,
             combined_text,
-            timestamp,
+            burst.last_timestamp,
             context_only=False,
         )
-        await self._update_pair_interactions(last_message, user_id, combined_text)
-        await self._note_persona_message(chat_id, user_id, timestamp)
+        await self._update_pair_interactions(
+            burst.last_message, burst.user_id, combined_text
+        )
+        await self._note_persona_message(
+            burst.chat_id, burst.user_id, burst.last_timestamp
+        )
+
+    def _should_break_burst(
+        self,
+        burst: _BurstState,
+        message: Message,
+        user_telegram_id: int,
+        timestamp: int,
+    ) -> bool:
+        if timestamp - burst.last_timestamp > self._settings.burst_gap_seconds:
+            return True
+        if self._settings.burst_max_duration_seconds > 0 and (
+            timestamp - burst.start_timestamp
+        ) > self._settings.burst_max_duration_seconds:
+            return True
+        reply_to_id = (
+            message.reply_to_message.from_user.id
+            if message.reply_to_message and message.reply_to_message.from_user
+            else None
+        )
+        if self._was_interrupted_by_turn(
+            burst.chat_id,
+            burst.user_telegram_id,
+            burst.last_timestamp,
+            timestamp,
+            reply_to_id,
+        ):
+            return True
+        return False
+
+    def _burst_limits_exceeded(self, burst: _BurstState) -> bool:
+        if (
+            self._settings.burst_max_parts > 0
+            and len(burst.texts) >= self._settings.burst_max_parts
+        ):
+            return True
+        if (
+            self._settings.burst_max_chars > 0
+            and burst.total_chars >= self._settings.burst_max_chars
+        ):
+            return True
+        return False
+
+    def _was_interrupted_by_turn(
+        self,
+        chat_id: int,
+        user_telegram_id: int,
+        last_timestamp: int,
+        current_timestamp: int,
+        reply_to_telegram_id: Optional[int],
+    ) -> bool:
+        events = self._chat_events.get(chat_id)
+        if not events or not self._settings.enable_bursts:
+            return False
+        window = self._settings.turn_window_seconds
+        for event in events:
+            if event.timestamp <= last_timestamp:
+                continue
+            if event.timestamp >= current_timestamp:
+                break
+            if event.user_telegram_id == user_telegram_id:
+                continue
+            if reply_to_telegram_id is not None and (
+                event.user_telegram_id == reply_to_telegram_id
+            ):
+                return True
+            if event.reply_to_telegram_id == user_telegram_id:
+                return True
+            if (
+                current_timestamp - event.timestamp <= window
+                and event.timestamp - last_timestamp <= window
+            ):
+                return True
+        return False
+
+    def _record_chat_event(self, message: Message, timestamp: int) -> None:
+        chat_id = message.chat_id
+        if chat_id is None or message.from_user is None:
+            return
+        reply_to_id = (
+            message.reply_to_message.from_user.id
+            if message.reply_to_message and message.reply_to_message.from_user
+            else None
+        )
+        event = _ChatEvent(
+            timestamp=timestamp,
+            user_telegram_id=message.from_user.id,
+            reply_to_telegram_id=reply_to_id,
+        )
+        events = self._chat_events.get(chat_id)
+        if events is None:
+            events = deque(maxlen=self._chat_events_maxlen)
+            self._chat_events[chat_id] = events
+        events.append(event)
 
     async def _flush_all_buffers(self) -> None:
         async with self._buffer_lock:
-            keys = list(self._message_buffers.keys())
+            keys = list(self._burst_states.keys())
         for key in keys:
             await self._flush_buffer_for_key(key)
 
