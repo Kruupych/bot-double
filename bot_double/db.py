@@ -3,8 +3,11 @@ from __future__ import annotations
 import sqlite3
 import threading
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import json
+import time
+
+from .utils import normalize_alias
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -73,6 +76,16 @@ CREATE TABLE IF NOT EXISTS persona_profiles (
     pending_messages INTEGER NOT NULL DEFAULT 0,
     last_analyzed_at INTEGER,
     PRIMARY KEY (chat_id, user_id),
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS user_aliases (
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    alias TEXT NOT NULL,
+    normalized_alias TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, normalized_alias),
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 """
@@ -188,10 +201,73 @@ class Database:
 
     def get_user_by_username(self, username: str) -> Optional[sqlite3.Row]:
         cursor = self._conn.execute(
-            "SELECT id, telegram_id, username, first_name, last_name FROM users WHERE username = ?",
+            """
+            SELECT id, telegram_id, username, first_name, last_name
+            FROM users
+            WHERE LOWER(username) = LOWER(?)
+            """,
             (username,),
         )
         return cursor.fetchone()
+
+    def get_chat_participants(self, chat_id: int) -> List[sqlite3.Row]:
+        cursor = self._conn.execute(
+            """
+            SELECT DISTINCT u.id, u.telegram_id, u.username, u.first_name, u.last_name
+            FROM users u
+            JOIN messages m ON m.user_id = u.id
+            WHERE m.chat_id = ?
+            """,
+            (chat_id,),
+        )
+        return cursor.fetchall()
+
+    def add_aliases(
+        self, chat_id: int, user_id: int, aliases: List[str]
+    ) -> Tuple[List[str], List[str]]:
+        if not aliases:
+            return [], []
+        added: List[str] = []
+        skipped: List[str] = []
+        timestamp = int(time.time())
+        with self._lock, self._conn:
+            for alias in aliases:
+                normalized = normalize_alias(alias)
+                if not normalized:
+                    skipped.append(alias)
+                    continue
+                try:
+                    self._conn.execute(
+                        """
+                        INSERT INTO user_aliases (chat_id, user_id, alias, normalized_alias, created_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (chat_id, user_id, alias.strip(), normalized, timestamp),
+                    )
+                except sqlite3.IntegrityError:
+                    skipped.append(alias)
+                else:
+                    added.append(alias)
+        return added, skipped
+
+    def delete_aliases(self, chat_id: int, user_id: int) -> int:
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM user_aliases WHERE chat_id = ? AND user_id = ?",
+                (chat_id, user_id),
+            )
+        return cursor.rowcount
+
+    def get_aliases_for_chat(self, chat_id: int) -> List[sqlite3.Row]:
+        cursor = self._conn.execute(
+            """
+            SELECT alias, normalized_alias, user_id
+            FROM user_aliases
+            WHERE chat_id = ?
+            """,
+            (chat_id,),
+        )
+        return cursor.fetchall()
 
     def get_user_by_telegram_id(self, telegram_id: int) -> Optional[sqlite3.Row]:
         cursor = self._conn.execute(

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import unicodedata
 from typing import Optional
 
 from telegram import Message
@@ -75,6 +77,19 @@ def _passes_text_filters(text: str, *, min_tokens: int) -> bool:
 
 def should_store_context_snippet(text: str, *, min_tokens: int) -> bool:
     return _passes_text_filters(text, min_tokens=min_tokens)
+
+
+_ALIAS_SANITIZE_RE = re.compile(r"[^0-9a-zа-яё\s]")
+
+
+def normalize_alias(text: str) -> str:
+    if not text:
+        return ""
+    normalized = unicodedata.normalize("NFKC", text).strip().lower()
+    normalized = normalized.replace("_", " ").replace("-", " ")
+    normalized = _ALIAS_SANITIZE_RE.sub(" ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
 
 
 _FEMALE_ENDINGS = ("а", "я", "ия", "ля", "ся", "на", "ра")

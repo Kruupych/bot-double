@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import io
 import json
 import logging
 import random
 import re
+import sqlite3
 import time
 from collections import deque
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple, TypeVar
+from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Set, Tuple, TypeVar
 
 from telegram import Message, MessageEntity, Update, User
 from telegram.constants import ParseMode
@@ -48,6 +50,7 @@ from .utils import (
     display_name,
     guess_gender,
     is_bufferable_message,
+    normalize_alias,
     should_store_context_snippet,
     should_store_message,
 )
@@ -74,6 +77,43 @@ class _BurstState:
     last_message: Message
     total_chars: int
     task: Optional[asyncio.Task] = None
+
+
+_CYR_TO_LAT = {
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "g",
+    "д": "d",
+    "е": "e",
+    "ё": "e",
+    "ж": "zh",
+    "з": "z",
+    "и": "i",
+    "й": "y",
+    "к": "k",
+    "л": "l",
+    "м": "m",
+    "н": "n",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "у": "u",
+    "ф": "f",
+    "х": "h",
+    "ц": "ts",
+    "ч": "ch",
+    "ш": "sh",
+    "щ": "shch",
+    "ъ": "",
+    "ы": "y",
+    "ь": "",
+    "э": "e",
+    "ю": "yu",
+    "я": "ya",
+}
 
 
 class BotDouble:
@@ -116,6 +156,8 @@ class BotDouble:
         self._persona_queue: Optional[asyncio.Queue[Tuple[int, int]]] = None
         self._persona_inflight: Set[Tuple[int, int]] = set()
         self._persona_worker: Optional[asyncio.Task] = None
+        self._alias_cache: Dict[int, Dict[str, int]] = {}
+        self._alias_display_cache: Dict[int, Dict[int, List[str]]] = {}
         self._transcriber: Optional[SpeechTranscriber] = None
         self._assistant_tasks: Optional[AssistantTaskEngine] = None
         if self._settings.enable_voice_transcription:
@@ -312,6 +354,103 @@ class BotDouble:
     async def auto_imitate_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self.auto_imitate_toggle(update, context, enabled=False)
 
+    async def alias_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        chat = update.effective_chat
+        if message is None or chat is None:
+            return
+        text = message.text or ""
+        parts = text.strip().split(None, 2)
+        if len(parts) < 2:
+            await message.reply_text(
+                "Использование: /alias @username прозвище1, прозвище2"
+            )
+            return
+        username_token = parts[1]
+        if not username_token.startswith("@"):
+            await message.reply_text("Первым аргументом должен быть @username")
+            return
+        username = username_token.lstrip("@")
+        alias_section = ""
+        if len(parts) == 3:
+            alias_section = parts[2]
+        else:
+            alias_section = (text.partition(username_token)[2] or "").strip()
+        if not alias_section:
+            await message.reply_text(
+                "Добавьте хотя бы одно прозвище после @username."
+            )
+            return
+        aliases = [alias.strip() for alias in alias_section.split(";")]
+        aliases = [chunk for alias in aliases for chunk in alias.split(",")]
+        aliases = [alias.strip() for alias in aliases if alias.strip()]
+        if not aliases:
+            await message.reply_text(
+                "Не удалось найти прозвища. Разделяйте их запятыми."
+            )
+            return
+        user_row = await self._run_db(self._db.get_user_by_username, username)
+        if user_row is None:
+            await message.reply_text(f"Я ещё не знаю пользователя @{username}.")
+            return
+        internal_id = int(user_row["id"])
+        added, skipped = await self._run_db(
+            self._db.add_aliases,
+            chat.id,
+            internal_id,
+            aliases,
+        )
+        self._invalidate_alias_cache(chat.id)
+        lines: List[str] = []
+        if added:
+            lines.append(
+                "Добавил прозвища: "
+                + ", ".join(list(dict.fromkeys(added)))
+            )
+        if skipped:
+            lines.append(
+                "Пропущено (уже есть или пустые): "
+                + ", ".join(list(dict.fromkeys(skipped)))
+            )
+        if not lines:
+            lines.append("Ничего не добавлено.")
+        await message.reply_text("\n".join(lines))
+
+    async def alias_reset_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        message = update.effective_message
+        chat = update.effective_chat
+        if message is None or chat is None:
+            return
+        if not context.args:
+            await message.reply_text("Использование: /alias_reset @username")
+            return
+        username_token = context.args[0]
+        if not username_token.startswith("@"):
+            await message.reply_text("Укажите @username для сброса прозвищ")
+            return
+        username = username_token.lstrip("@")
+        user_row = await self._run_db(self._db.get_user_by_username, username)
+        if user_row is None:
+            await message.reply_text(f"Я ещё не знаю пользователя @{username}.")
+            return
+        internal_id = int(user_row["id"])
+        deleted = await self._run_db(
+            self._db.delete_aliases,
+            chat.id,
+            internal_id,
+        )
+        self._invalidate_alias_cache(chat.id)
+        if deleted:
+            await message.reply_text(
+                f"Удалено {deleted} прозвищ для @{username}."
+            )
+        else:
+            await message.reply_text(
+                f"Для @{username} не было сохранённых прозвищ."
+            )
+
     async def on_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
         chat = update.effective_chat
@@ -356,59 +495,7 @@ class BotDouble:
 
         # Use message text without mentions as starter
         starter = self._strip_mentions(message.text or "", mention_usernames)
-        samples = await self._collect_style_samples(
-            chat.id,
-            int(user_row["id"]),
-            topic_hint=starter,
-        )
-        if not samples:
-            return
-
-        persona_card = await self._get_persona_card(chat.id, int(user_row["id"]))
-        style_summary = None if persona_card else build_style_summary(samples)
-
-        persona_name = display_name(
-            user_row["username"], user_row["first_name"], user_row["last_name"]
-        )
-        context_messages = await self._get_dialog_context(chat.id)
-        peer_profiles = await self._collect_peer_profiles(chat.id, int(user_row["id"]))
-        requester_profile = await self._collect_requester_profile(
-            chat.id, message.from_user, int(user_row["id"])
-        )
-        persona_gender = guess_gender(
-            user_row["first_name"], user_row["username"]
-        )
-        addressee_internal_id = await self._ensure_internal_user(message.from_user)
-        addressee_name = display_name(
-            message.from_user.username,
-            message.from_user.first_name,
-            message.from_user.last_name,
-        )
-        relationship_hint = await self._relationship_hint_for_addressee(
-            chat.id,
-            int(user_row["id"]),
-            addressee_internal_id,
-            addressee_name,
-        )
-        try:
-            ai_reply = await self._generate_reply(
-                username,
-                persona_name,
-                samples,
-                starter,
-                context_messages,
-                peer_profiles,
-                requester_profile,
-                persona_gender,
-                style_summary,
-                persona_card,
-                relationship_hint,
-            )
-        except Exception as exc:  # pragma: no cover - network errors etc.
-            LOGGER.exception("Auto imitation failed", exc_info=exc)
-            return
-
-        await message.reply_text(ai_reply)
+        await self._handle_imitation_for_user(message, user_row, starter)
 
     async def on_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
@@ -847,6 +934,221 @@ class BotDouble:
             cleaned = cleaned.replace(f"@{username}", "").strip()
         return cleaned or "Продолжи диалог."
 
+    async def _get_alias_maps(
+        self, chat_id: int
+    ) -> Tuple[Dict[str, int], Dict[int, List[str]]]:
+        if chat_id in self._alias_cache and chat_id in self._alias_display_cache:
+            return self._alias_cache[chat_id], self._alias_display_cache[chat_id]
+        rows = await self._run_db(self._db.get_aliases_for_chat, chat_id)
+        alias_map: Dict[str, int] = {}
+        display_map: Dict[int, List[str]] = {}
+        for row in rows:
+            normalized = str(row["normalized_alias"])
+            user_id = int(row["user_id"])
+            alias_map[normalized] = user_id
+            display_map.setdefault(user_id, []).append(str(row["alias"]))
+        self._alias_cache[chat_id] = alias_map
+        self._alias_display_cache[chat_id] = display_map
+        return alias_map, display_map
+
+    def _transliterate(self, text: str) -> str:
+        result_chars: List[str] = []
+        for char in text:
+            result_chars.append(_CYR_TO_LAT.get(char, char))
+        return "".join(result_chars)
+
+    def _generate_variants(self, values: Iterable[str]) -> Set[str]:
+        variants: Set[str] = set()
+        for value in values:
+            normalized = normalize_alias(value)
+            if not normalized:
+                continue
+            variants.add(normalized)
+            translit = self._transliterate(normalized)
+            if translit and translit != normalized:
+                variants.add(translit)
+        return variants
+
+    def _candidate_keys_for_user(
+        self, row: sqlite3.Row, aliases: Optional[List[str]]
+    ) -> Set[str]:
+        values: List[str] = []
+        username = row["username"]
+        first_name = row["first_name"]
+        last_name = row["last_name"]
+        if username:
+            values.append(username)
+            values.append(f"@{username}")
+        if first_name:
+            values.append(first_name)
+        if last_name:
+            values.append(last_name)
+        if first_name and last_name:
+            values.append(f"{first_name} {last_name}")
+        display = display_name(username, first_name, last_name)
+        if display:
+            values.append(display)
+        if aliases:
+            values.extend(aliases)
+        return self._generate_variants(values)
+
+    def _descriptor_variants(self, descriptor: str) -> Set[str]:
+        cleaned = descriptor.strip()
+        cleaned = re.sub(r"[\"'“”«»]+", "", cleaned)
+        candidates: List[str] = []
+        parts = re.split(r"[:;,\n\-–—]", cleaned, maxsplit=1)
+        base = parts[0].strip()
+        if base:
+            candidates.append(base)
+        tokens = base.split()
+        if len(tokens) > 1:
+            for length in range(len(tokens), 0, -1):
+                segment = " ".join(tokens[:length]).strip()
+                if segment and segment not in candidates:
+                    candidates.append(segment)
+        if cleaned and cleaned not in candidates:
+            candidates.append(cleaned)
+        variants: Set[str] = set()
+        for candidate in candidates:
+            normalized = normalize_alias(candidate)
+            if not normalized:
+                continue
+            variants.add(normalized)
+            translit = self._transliterate(normalized)
+            if translit and translit != normalized:
+                variants.add(translit)
+        return variants
+
+    def _score_descriptor(
+        self, descriptor_variants: Iterable[str], candidate_keys: Iterable[str]
+    ) -> float:
+        best = 0.0
+        candidate_list = list(candidate_keys)
+        if not candidate_list:
+            return 0.0
+        for descriptor in descriptor_variants:
+            tokens1 = set(descriptor.split())
+            for candidate in candidate_list:
+                if descriptor == candidate:
+                    return 1.0
+                if descriptor and candidate and (
+                    descriptor in candidate or candidate in descriptor
+                ):
+                    best = max(best, 0.92)
+                    continue
+                tokens2 = set(candidate.split())
+                if tokens1 and tokens1 <= tokens2:
+                    best = max(best, 0.88)
+                    continue
+                if tokens1 and tokens2:
+                    overlap = tokens1 & tokens2
+                    if overlap:
+                        ratio = len(overlap) / max(len(tokens1), len(tokens2))
+                        best = max(best, 0.65 + 0.25 * ratio)
+                        continue
+                similarity = difflib.SequenceMatcher(None, descriptor, candidate).ratio()
+                if similarity >= 0.75:
+                    best = max(best, similarity * 0.85)
+        return best
+
+    async def _resolve_user_descriptor(
+        self, chat_id: Optional[int], descriptor: str
+    ) -> Tuple[Optional[sqlite3.Row], List[Tuple[sqlite3.Row, float]]]:
+        if not descriptor:
+            return None, []
+        descriptor = descriptor.strip()
+        if descriptor.startswith("@"):
+            username = descriptor.lstrip("@")
+            row = await self._run_db(self._db.get_user_by_username, username)
+            return row, []
+        if chat_id is None:
+            return None, []
+
+        alias_map, alias_display = await self._get_alias_maps(chat_id)
+        descriptor_variants = self._descriptor_variants(descriptor)
+
+        for variant in list(descriptor_variants):
+            if variant in alias_map:
+                user_id = alias_map[variant]
+                row = await self._fetch_user_row(chat_id, user_id)
+                if row:
+                    return row, []
+
+        participants = await self._run_db(self._db.get_chat_participants, chat_id)
+        rows_by_id: Dict[int, sqlite3.Row] = {
+            int(row["id"]): row for row in participants
+        }
+        # include aliased users who may not have messages yet
+        for user_id in alias_display.keys():
+            if user_id not in rows_by_id:
+                row = await self._run_db(self._db.get_user_by_id, user_id)
+                if row:
+                    rows_by_id[user_id] = row
+
+        best_candidates: List[Tuple[sqlite3.Row, float]] = []
+        best_score = 0.0
+        for user_id, row in rows_by_id.items():
+            if self._bot_user_id is not None and user_id == self._bot_user_id:
+                continue
+            aliases = alias_display.get(user_id)
+            candidate_keys = self._candidate_keys_for_user(row, aliases)
+            score = self._score_descriptor(descriptor_variants, candidate_keys)
+            if score < 0.55:
+                continue
+            if score > best_score + 0.05:
+                best_score = score
+                best_candidates = [(row, score)]
+            elif abs(score - best_score) <= 0.05:
+                best_candidates.append((row, score))
+
+        if best_score >= 0.78 and len(best_candidates) == 1:
+            return best_candidates[0][0], []
+
+        if best_candidates:
+            best_candidates.sort(key=lambda item: item[1], reverse=True)
+            return None, best_candidates[:3]
+
+        return None, []
+
+    async def _fetch_user_row(self, chat_id: int, user_id: int) -> Optional[sqlite3.Row]:
+        return await self._run_db(self._db.get_user_by_id, user_id)
+
+    def _parse_imitation_request(
+        self, instruction: str
+    ) -> Optional[Tuple[str, Optional[str]]]:
+        lowered = instruction.lower()
+        triggers = ["имитируй", "ответь как", "что бы сказал"]
+        for trigger in triggers:
+            idx = lowered.find(trigger)
+            if idx == -1:
+                continue
+            remainder = instruction[idx + len(trigger) :].strip()
+            if not remainder:
+                continue
+            descriptor, payload = self._split_imitation_remainder(remainder)
+            if descriptor:
+                return descriptor, payload
+        return None
+
+    def _split_imitation_remainder(
+        self, remainder: str
+    ) -> Tuple[Optional[str], Optional[str]]:
+        if not remainder:
+            return None, None
+        if remainder.startswith("@"):
+            parts = remainder.split(None, 1)
+            descriptor = parts[0]
+            payload = parts[1].strip() if len(parts) > 1 else None
+            return descriptor, payload
+        for delimiter in [":", "—", "–", "-", "\n", ","]:
+            idx = remainder.find(delimiter)
+            if idx != -1:
+                descriptor = remainder[:idx].strip()
+                payload = remainder[idx + 1 :].strip() or None
+                if descriptor:
+                    return descriptor, payload
+        return remainder.strip(), None
+
     async def _maybe_handle_intent(
         self, message: Message, text: str, from_voice: bool
     ) -> bool:
@@ -868,14 +1170,47 @@ class BotDouble:
         cleaned_instruction = self._strip_call_signs(stripped)
         cleaned_lower = cleaned_instruction.lower()
 
-        imitate_match = re.search(
-            r"(имитируй|ответь как|что бы сказал)\s+@?([\w_]{3,})",
-            cleaned_lower,
-        )
-        if imitate_match:
-            username = imitate_match.group(2)
-            payload = self._extract_payload(
-                message, cleaned_instruction, keywords=[imitate_match.group(1)]
+        imitation_request = self._parse_imitation_request(cleaned_instruction)
+        if imitation_request:
+            descriptor, inline_payload = imitation_request
+            resolved_row, suggestions = await self._resolve_user_descriptor(
+                message.chat_id, descriptor
+            )
+            if resolved_row is None:
+                if suggestions:
+                    lines = [
+                        "Не уверена, кого имитировать. Возможные варианты:",
+                    ]
+                    alias_display = {}
+                    if message.chat is not None:
+                        _, alias_display = await self._get_alias_maps(message.chat.id)
+                    for candidate, score in suggestions:
+                        name = display_name(
+                            candidate["username"],
+                            candidate["first_name"],
+                            candidate["last_name"],
+                        )
+                        username = candidate["username"]
+                        handle = f"@{username}" if username else name
+                        aliases = alias_display.get(int(candidate["id"]), [])
+                        alias_hint = (
+                            f" (алиасы: {', '.join(aliases)})" if aliases else ""
+                        )
+                        lines.append(f"• {handle}{alias_hint}")
+                    lines.append(
+                        "Уточните имя или создайте прозвища через /alias @username ..."
+                    )
+                    await message.reply_text("\n".join(lines))
+                else:
+                    await message.reply_text(
+                        "Не могу понять, кого имитировать. Используйте @username или добавьте алиас через /alias."
+                    )
+                return True
+
+            payload = inline_payload or self._extract_payload(
+                message,
+                cleaned_instruction,
+                keywords=["имитируй", "ответь как", "что бы сказал"],
             )
             if not payload:
                 payload = self._extract_reply_text(message)
@@ -884,7 +1219,9 @@ class BotDouble:
                     "Нужен текст для имитации — добавьте подсказку или ответьте на сообщение."
                 )
                 return True
-            await self._handle_imitation_intent(message, username, payload.strip())
+            await self._handle_imitation_for_user(
+                message, resolved_row, payload.strip()
+            )
             return True
 
         if not direct_address and not reply_to_bot and message.chat.type != "private":
@@ -1168,45 +1505,41 @@ class BotDouble:
             return
         await message.reply_text(text, disable_web_page_preview=True)
 
-    async def _handle_imitation_intent(
-        self, message: Message, username: str, starter: str
+    async def _handle_imitation_for_user(
+        self, message: Message, user_row: sqlite3.Row, starter: str
     ) -> None:
-        username = username.lstrip("@")
-        if not username:
-            await message.reply_text("Укажите @username для имитации.")
-            return
         chat = message.chat
         if chat is None:
             return
-        user_row = await self._run_db(self._db.get_user_by_username, username)
-        if user_row is None:
-            await message.reply_text(f"Я ещё не знаю пользователя @{username}.")
-            return
+        user_id = int(user_row["id"])
+        display = display_name(
+            user_row["username"], user_row["first_name"], user_row["last_name"]
+        )
         message_count = await self._run_db(
-            self._db.get_message_count, chat.id, int(user_row["id"])
+            self._db.get_message_count, chat.id, user_id
         )
         if message_count < self._settings.min_messages_for_profile:
             await message.reply_text(
-                f"Мне нужно больше сообщений @{username}, чтобы имитировать его стиль."
+                f"Мне нужно больше сообщений {display}, чтобы имитировать его стиль."
             )
             return
         samples = await self._collect_style_samples(
-            chat.id, int(user_row["id"]), topic_hint=starter
+            chat.id, user_id, topic_hint=starter
         )
         if not samples:
             await message.reply_text(
-                f"Сообщений @{username} пока недостаточно для генерации ответа."
+                f"Сообщений {display} пока недостаточно для генерации ответа."
             )
             return
-        persona_card = await self._get_persona_card(chat.id, int(user_row["id"]))
+        persona_card = await self._get_persona_card(chat.id, user_id)
         style_summary = None if persona_card else build_style_summary(samples)
         persona_name = display_name(
             user_row["username"], user_row["first_name"], user_row["last_name"]
         )
         context_messages = await self._get_dialog_context(chat.id)
-        peer_profiles = await self._collect_peer_profiles(chat.id, int(user_row["id"]))
+        peer_profiles = await self._collect_peer_profiles(chat.id, user_id)
         requester_profile = await self._collect_requester_profile(
-            chat.id, message.from_user, int(user_row["id"])
+            chat.id, message.from_user, user_id
         )
         persona_gender = guess_gender(
             user_row["first_name"], user_row["username"]
@@ -1219,13 +1552,13 @@ class BotDouble:
         )
         relationship_hint = await self._relationship_hint_for_addressee(
             chat.id,
-            int(user_row["id"]),
+            user_id,
             addressee_internal_id,
             addressee_name,
         )
         try:
             reply_text = await self._generate_reply(
-                username,
+                user_row["username"] or "",
                 persona_name,
                 samples,
                 starter,
@@ -1630,6 +1963,12 @@ class BotDouble:
             events = deque(maxlen=self._chat_events_maxlen)
             self._chat_events[chat_id] = events
         events.append(event)
+
+    def _invalidate_alias_cache(self, chat_id: Optional[int]) -> None:
+        if chat_id is None:
+            return
+        self._alias_cache.pop(chat_id, None)
+        self._alias_display_cache.pop(chat_id, None)
 
     async def _maybe_transcribe_voice_message(self, message: Message) -> Optional[str]:
         if self._transcriber is None:
@@ -2225,6 +2564,8 @@ def run_bot(settings: Settings) -> None:
     application.add_handler(CommandHandler("profile", bot.profile_command))
     application.add_handler(CommandHandler("me", bot.profile_command))
     application.add_handler(CommandHandler("forgetme", bot.forget_me))
+    application.add_handler(CommandHandler("alias", bot.alias_command))
+    application.add_handler(CommandHandler("alias_reset", bot.alias_reset_command))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, bot.on_new_members))
     application.add_handler(MessageHandler(filters.VOICE, bot.on_voice_message))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.on_text_message))
