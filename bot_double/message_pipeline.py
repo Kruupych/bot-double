@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Dict, Optional, Tuple, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from telegram import Message
 
@@ -15,13 +14,12 @@ from .utils import (
 
 if TYPE_CHECKING:  # pragma: no cover - only for type hints
     from .bot import BotDouble
-
-
-@dataclass
-class ChatEvent:
-    timestamp: int
-    user_telegram_id: int
-    reply_to_telegram_id: Optional[int]
+@dataclass(slots=True)
+class CarryoverBuffer:
+    texts: List[str]
+    last_message: Message
+    last_timestamp: int
+    user_id: int
 
 
 class MessagePipeline:
@@ -30,8 +28,7 @@ class MessagePipeline:
     def __init__(self, bot: "BotDouble") -> None:
         self._bot = bot
         self._burst_manager: Optional[BurstManager] = None
-        self._chat_events: Dict[int, Deque[ChatEvent]] = {}
-        self._chat_events_maxlen = 50
+        self._carryover: Dict[Tuple[int, int], CarryoverBuffer] = {}
 
     def attach_burst_manager(self, manager: BurstManager) -> None:
         self._burst_manager = manager
@@ -78,7 +75,6 @@ class MessagePipeline:
         if text_source_voice:
             if text.startswith(('/', '!', '.')):
                 await self.flush_buffer_for_key(key)
-                self._record_chat_event(message, timestamp)
                 return None
             should_store = should_store_context_snippet(
                 text, min_tokens=self._bot._settings.min_tokens_to_store
@@ -100,7 +96,16 @@ class MessagePipeline:
                 allowed_bot_id=bot_id,
             )
 
-        if should_store or bufferable:
+        if should_store:
+            await self.flush_buffer_for_key(key)
+            await self._store_fragments(
+                key,
+                [text],
+                message,
+                user_id,
+                timestamp,
+            )
+        elif bufferable:
             await self._append_to_burst(
                 key,
                 message,
@@ -126,7 +131,6 @@ class MessagePipeline:
                 context_only=True,
             )
 
-        self._record_chat_event(message, timestamp)
         return text, text_source_voice
 
     def should_break_burst(
@@ -137,65 +141,39 @@ class MessagePipeline:
         timestamp: int,
     ) -> bool:
         settings = self._bot._settings
+        if user_telegram_id != burst.user_telegram_id:
+            return True
         if timestamp - burst.last_timestamp > settings.burst_gap_seconds:
             return True
         if settings.burst_max_duration_seconds > 0 and (
             timestamp - burst.start_timestamp
         ) > settings.burst_max_duration_seconds:
             return True
-        reply_to_id = (
-            message.reply_to_message.from_user.id
-            if message.reply_to_message and message.reply_to_message.from_user
-            else None
-        )
-        if self._was_interrupted_by_turn(
-            burst.chat_id,
-            burst.user_telegram_id,
-            burst.last_timestamp,
-            timestamp,
-            reply_to_id,
-        ):
-            return True
         return False
 
     async def store_burst(self, burst: BurstState) -> None:
-        combined_text = " ".join(burst.texts).strip()
-        if not combined_text:
-            return
-        if not should_store_context_snippet(
-            combined_text, min_tokens=self._bot._settings.min_tokens_to_store
-        ):
-            return
-        combined_text = self._bot._truncate_for_storage(combined_text)
-        await self._bot._run_db(
-            self._bot._db.store_message,
-            burst.chat_id,
+        await self._store_fragments(
+            (burst.chat_id, burst.user_id),
+            burst.texts,
+            burst.last_message,
             burst.user_id,
-            combined_text,
             burst.last_timestamp,
-            context_only=False,
-        )
-        await self._bot._update_pair_interactions(
-            burst.last_message, burst.user_id, combined_text
-        )
-        await self._bot._note_persona_message(
-            burst.chat_id, burst.user_id, burst.last_timestamp
         )
 
     async def flush_all_buffers(self) -> None:
-        if self._burst_manager is None:
-            return
-        await self._burst_manager.flush_all()
+        if self._burst_manager is not None:
+            await self._burst_manager.flush_all()
+        await self._flush_all_carryover(force=True)
 
     async def flush_buffers_for_chat(self, chat_id: int) -> None:
-        if self._burst_manager is None:
-            return
-        await self._burst_manager.flush_for_chat(chat_id)
+        if self._burst_manager is not None:
+            await self._burst_manager.flush_for_chat(chat_id)
+        await self._flush_carryover_for_chat(chat_id, force=True)
 
     async def flush_buffer_for_key(self, key: Tuple[int, int]) -> None:
-        if self._burst_manager is None:
-            return
-        await self._burst_manager.flush_key(key)
+        if self._burst_manager is not None:
+            await self._burst_manager.flush_key(key)
+        await self._flush_carryover_for_key(key, force=False)
 
     async def _append_to_burst(
         self,
@@ -228,54 +206,110 @@ class MessagePipeline:
         remainder = parts[1].strip()
         return remainder or None
 
-    def _was_interrupted_by_turn(
+    async def _store_fragments(
         self,
-        chat_id: int,
-        user_telegram_id: int,
-        last_timestamp: int,
-        current_timestamp: int,
-        reply_to_telegram_id: Optional[int],
-    ) -> bool:
-        events = self._chat_events.get(chat_id)
-        if not events or not self._bot._settings.enable_bursts:
-            return False
-        window = self._bot._settings.turn_window_seconds
-        for event in events:
-            if event.timestamp <= last_timestamp:
-                continue
-            if event.timestamp >= current_timestamp:
-                break
-            if event.user_telegram_id == user_telegram_id:
-                continue
-            if reply_to_telegram_id is not None and (
-                event.user_telegram_id == reply_to_telegram_id
-            ):
-                return True
-            if event.reply_to_telegram_id == user_telegram_id:
-                return True
-            if (
-                current_timestamp - event.timestamp <= window
-                and event.timestamp - last_timestamp <= window
-            ):
-                return True
-        return False
-
-    def _record_chat_event(self, message: Message, timestamp: int) -> None:
-        chat_id = message.chat_id
-        if chat_id is None or message.from_user is None:
+        key: Tuple[int, int],
+        fragments: List[str],
+        message: Message,
+        user_id: int,
+        timestamp: int,
+        *,
+        force: bool = False,
+    ) -> None:
+        if not fragments:
             return
-        reply_to_id = (
-            message.reply_to_message.from_user.id
-            if message.reply_to_message and message.reply_to_message.from_user
-            else None
+        carryover = self._carryover.pop(key, None)
+        pieces: List[str] = []
+        if carryover and carryover.texts:
+            if self._carryover_is_expired(carryover, timestamp):
+                await self._persist_text(
+                    carryover.texts,
+                    carryover.last_message,
+                    carryover.user_id,
+                    carryover.last_timestamp,
+                    force=True,
+                )
+            else:
+                pieces.extend(carryover.texts)
+        pieces.extend(fragments)
+        stored = await self._persist_text(
+            pieces,
+            message,
+            user_id,
+            timestamp,
+            force=force,
         )
-        event = ChatEvent(
-            timestamp=timestamp,
-            user_telegram_id=message.from_user.id,
-            reply_to_telegram_id=reply_to_id,
+        if not stored:
+            self._carryover[key] = CarryoverBuffer(
+                texts=pieces,
+                last_message=message,
+                last_timestamp=timestamp,
+                user_id=user_id,
+            )
+
+    async def _persist_text(
+        self,
+        fragments: List[str],
+        message: Message,
+        user_id: int,
+        timestamp: int,
+        *,
+        force: bool,
+    ) -> bool:
+        combined_text = " ".join(fragments).strip()
+        if not combined_text:
+            return True
+        meets_threshold = should_store_context_snippet(
+            combined_text, min_tokens=self._bot._settings.min_tokens_to_store
         )
-        events = self._chat_events.get(chat_id)
-        if events is None:
-            events = deque(maxlen=self._chat_events_maxlen)
-            self._chat_events[chat_id] = events
-        events.append(event)
+        if not meets_threshold and not force:
+            return False
+        chat_id = message.chat_id
+        if chat_id is None:
+            return True
+        combined_text = self._bot._truncate_for_storage(combined_text)
+        await self._bot._run_db(
+            self._bot._db.store_message,
+            chat_id,
+            user_id,
+            combined_text,
+            timestamp,
+            context_only=False,
+        )
+        await self._bot._update_pair_interactions(message, user_id, combined_text)
+        await self._bot._note_persona_message(chat_id, user_id, timestamp)
+        return True
+
+    def _carryover_is_expired(
+        self, carryover: CarryoverBuffer, current_timestamp: int
+    ) -> bool:
+        max_age = self._bot._settings.burst_carryover_max_age_seconds
+        if max_age <= 0:
+            return False
+        return (current_timestamp - carryover.last_timestamp) > max_age
+
+    async def _flush_carryover_for_key(
+        self, key: Tuple[int, int], *, force: bool
+    ) -> None:
+        buffer = self._carryover.pop(key, None)
+        if buffer is None:
+            return
+        stored = await self._persist_text(
+            buffer.texts,
+            buffer.last_message,
+            buffer.user_id,
+            buffer.last_timestamp,
+            force=force,
+        )
+        if not stored:
+            self._carryover[key] = buffer
+
+    async def _flush_carryover_for_chat(self, chat_id: int, *, force: bool) -> None:
+        keys = [key for key in self._carryover.keys() if key[0] == chat_id]
+        for key in keys:
+            await self._flush_carryover_for_key(key, force=force)
+
+    async def _flush_all_carryover(self, *, force: bool) -> None:
+        keys = list(self._carryover.keys())
+        for key in keys:
+            await self._flush_carryover_for_key(key, force=force)
