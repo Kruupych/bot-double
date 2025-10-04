@@ -32,6 +32,7 @@ class Settings:
     burst_max_duration_seconds: int = 90
     burst_max_parts: int = 6
     burst_max_chars: int = 2000
+    burst_carryover_max_age_seconds: int = 120
     max_store_chars: int = 1200
     turn_window_seconds: int = 10
     enable_bursts: bool = True
@@ -139,6 +140,12 @@ def load_settings() -> Settings:
     )
     burst_max_parts = _get_env_int("BURST_MAX_PARTS", 6, minimum=1)
     burst_max_chars = _get_env_int("BURST_MAX_CHARS", 2000, minimum=0)
+    default_carryover_age = max(
+        burst_max_duration_seconds, burst_inactivity_seconds * 3
+    )
+    burst_carryover_max_age_seconds = _get_env_int(
+        "BURST_CARRYOVER_MAX_AGE_SECONDS", default_carryover_age, minimum=0
+    )
     max_store_chars = _get_env_int("MAX_STORE_CHARS", 1200, minimum=0)
     turn_window_seconds = _get_env_int("TURN_WINDOW_SECONDS", 10, minimum=1)
     enable_bursts = _get_env_bool("ENABLE_BURSTS", True)
@@ -195,6 +202,7 @@ def load_settings() -> Settings:
         burst_max_duration_seconds=burst_max_duration_seconds,
         burst_max_parts=burst_max_parts,
         burst_max_chars=burst_max_chars,
+        burst_carryover_max_age_seconds=burst_carryover_max_age_seconds,
         max_store_chars=max_store_chars,
         turn_window_seconds=turn_window_seconds,
         enable_bursts=enable_bursts,
