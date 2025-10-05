@@ -267,6 +267,36 @@ class Database:
                 if not normalized:
                     skipped.append(alias)
                     continue
+                existing = self._conn.execute(
+                    """
+                    SELECT user_id
+                    FROM user_aliases
+                    WHERE chat_id = ? AND normalized_alias = ?
+                    """,
+                    (chat_id, normalized),
+                ).fetchone()
+                if existing is not None:
+                    current_user_id = int(existing["user_id"])
+                    if current_user_id == user_id:
+                        skipped.append(alias)
+                        continue
+                    # Alias принадлежал другому пользователю — перекидываем
+                    self._conn.execute(
+                        """
+                        UPDATE user_aliases
+                        SET user_id = ?, alias = ?, created_at = ?
+                        WHERE chat_id = ? AND normalized_alias = ?
+                        """,
+                        (
+                            user_id,
+                            alias.strip(),
+                            timestamp,
+                            chat_id,
+                            normalized,
+                        ),
+                    )
+                    added.append(alias)
+                    continue
                 try:
                     self._conn.execute(
                         """
