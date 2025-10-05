@@ -23,7 +23,6 @@ from telegram.ext import (
     filters,
 )
 
-from .assistant_tasks import AssistantTaskEngine, TaskResult
 from .burst_manager import BurstManager
 from .command_service import CommandService
 from .imitation_service import ImitationService
@@ -139,7 +138,6 @@ class BotDouble:
         self._alias_cache: Dict[int, Dict[str, int]] = {}
         self._alias_display_cache: Dict[int, Dict[int, List[str]]] = {}
         self._transcriber: Optional[SpeechTranscriber] = None
-        self._assistant_tasks: Optional[AssistantTaskEngine] = None
         self._imitation = ImitationToolkit(
             bot_name=self._bot_name,
             bot_username=self._bot_username,
@@ -151,11 +149,6 @@ class BotDouble:
                 settings.openai_api_key,
                 settings.voice_transcription_model,
                 language=settings.voice_transcription_language,
-            )
-        if self._settings.enable_freeform_intents:
-            self._assistant_tasks = AssistantTaskEngine(
-                settings.openai_api_key,
-                settings.openai_model,
             )
 
         self._commands = CommandService(
@@ -644,42 +637,10 @@ class BotDouble:
                 return value
         return "английский"
 
-    async def _run_assistant_task(self, func: Callable[..., TaskResult], *args: object) -> str:
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, partial(func, *args))
-        return result.text
-
-    async def _execute_assistant_task(
-        self,
-        message: Message,
-        func: Callable[..., TaskResult],
-        *args: object,
-        prefix: Optional[str] = None,
-    ) -> Optional[str]:
-        if not self._imitation.reserve_answer_slot(message):
-            return None
-        try:
-            result = await self._run_assistant_task(func, *args)
-        except Exception as exc:
-            LOGGER.exception("Assistant task failed", exc_info=exc)
-            await message.reply_text(
-                "Не удалось выполнить запрос к модели. Попробуйте ещё раз позже."
-            )
-            return None
-        text = result.strip()
-        if not text:
-            await message.reply_text("Модель не вернула результат.")
-            return None
-        if prefix:
-            await message.reply_text(f"{prefix}\n{text}", disable_web_page_preview=True)
-        else:
-            await message.reply_text(text, disable_web_page_preview=True)
-        return text
-
     async def _maybe_handle_intent(
         self, message: Message, text: str, from_voice: bool
     ) -> bool:
-        if not self._settings.enable_freeform_intents or self._assistant_tasks is None:
+        if not self._settings.enable_freeform_intents:
             return False
         stripped = text.strip()
         if not stripped:
@@ -832,183 +793,6 @@ class BotDouble:
             and message.chat.type != "private"
         ):
             return False
-
-        payload: Optional[str]
-
-        if any(token in cleaned_lower for token in ("переведи", "translate")):
-            language = self._parse_language(cleaned_lower)
-            payload = self._imitation.extract_payload(
-                message,
-                cleaned_instruction,
-                keywords=["переведи", "translate"],
-            )
-            if not payload:
-                await message.reply_text(
-                    "Пришлите текст для перевода или ответьте на сообщение с текстом."
-                )
-                return True
-            await self._execute_assistant_task(
-                message,
-                self._assistant_tasks.translate,
-                payload,
-                language,
-                prefix=f"Перевод на {language}:",
-            )
-            return True
-
-        if any(token in cleaned_lower for token in ("перескаж", "резюмируй", "кратко")):
-            payload = self._imitation.extract_payload(
-                message,
-                cleaned_instruction,
-                keywords=["перескаж", "резюмируй", "кратко"],
-            )
-            if not payload:
-                await message.reply_text(
-                    "Чтобы пересказать, ответьте на сообщение или укажите текст после двоеточия."
-                )
-                return True
-            await self._execute_assistant_task(
-                message,
-                self._assistant_tasks.summarize,
-                payload,
-                prefix="Кратко:",
-            )
-            return True
-
-        if any(token in cleaned_lower for token in ("перефраз", "формулир")):
-            payload = self._imitation.extract_payload(
-                message,
-                cleaned_instruction,
-                keywords=["перефраз", "сформулируй", "формулир"],
-            )
-            if not payload:
-                await message.reply_text(
-                    "Добавьте текст для перефразирования или ответьте на сообщение."
-                )
-                return True
-            await self._execute_assistant_task(
-                message,
-                self._assistant_tasks.paraphrase,
-                payload,
-                "Перепиши текст своими словами, сохранив смысл.",
-            )
-            return True
-
-        if "исправь ошибки" in cleaned_lower or (
-            "провер" in cleaned_lower and "ошиб" in cleaned_lower
-        ):
-            payload = self._imitation.extract_payload(
-                message,
-                cleaned_instruction,
-                keywords=["исправь", "проверь", "ошиб"],
-            )
-            if not payload:
-                await message.reply_text(
-                    "Чтобы исправить ошибки, пришлите текст или ответьте на сообщение."
-                )
-                return True
-            await self._execute_assistant_task(
-                message,
-                self._assistant_tasks.proofread,
-                payload,
-            )
-            return True
-
-        if "список" in cleaned_lower and "задач" in cleaned_lower:
-            payload = self._imitation.extract_payload(
-                message,
-                cleaned_instruction,
-                keywords=["список", "задач", "сделай"],
-            )
-            if not payload:
-                await message.reply_text(
-                    "Чтобы составить список задач, ответьте на сообщение или добавьте текст после команды."
-                )
-                return True
-            await self._execute_assistant_task(
-                message,
-                self._assistant_tasks.listify,
-                payload,
-            )
-            return True
-
-        tone_instruction: Optional[str] = None
-        if "вежлив" in cleaned_lower:
-            tone_instruction = "Сделай текст вежливым и уважительным."
-        elif "официал" in cleaned_lower:
-            tone_instruction = "Сделай текст официальным и деловым."
-        elif "дружелюб" in cleaned_lower:
-            tone_instruction = "Сделай текст дружелюбным и тёплым."
-        elif "токсич" in cleaned_lower:
-            tone_instruction = "Убери токсичность и агрессию, сделай нейтральным."
-        elif "добавь" in cleaned_lower and (
-            "смай" in cleaned_lower or "эмодз" in cleaned_lower
-        ):
-            tone_instruction = "Добавь немного уместных эмодзи."
-        elif "убери" in cleaned_lower and (
-            "смай" in cleaned_lower or "эмодз" in cleaned_lower
-        ):
-            tone_instruction = "Убери эмодзи и сделай текст нейтральным."
-
-        if tone_instruction:
-            payload = self._imitation.extract_payload(
-                message,
-                cleaned_instruction,
-                keywords=[
-                    "сделай",
-                    "убери",
-                    "добавь",
-                    "вежлив",
-                    "дружелюб",
-                    "токсич",
-                    "эмодз",
-                    "смай",
-                ],
-            )
-            if not payload:
-                await message.reply_text(
-                    "Чтобы изменить тон, добавьте текст или ответьте на сообщение."
-                )
-                return True
-            await self._execute_assistant_task(
-                message,
-                self._assistant_tasks.paraphrase,
-                payload,
-                tone_instruction,
-            )
-            return True
-
-        if (
-            "что ответить" in cleaned_lower
-            or "сформулируй ответ" in cleaned_lower
-            or "помоги ответить" in cleaned_lower
-        ):
-            payload = self._imitation.extract_payload(
-                message,
-                cleaned_instruction,
-                keywords=["что ответить", "сформулируй", "ответ"],
-            )
-            if not payload:
-                await message.reply_text(
-                    "Чтобы помочь с ответом, добавьте текст сообщения или ответьте на него."
-                )
-                return True
-            await self._execute_assistant_task(
-                message,
-                self._assistant_tasks.respond_helpfully,
-                payload,
-                "Ответь кратко и по существу.",
-            )
-            return True
-
-        if direct_address and "?" in stripped and len(stripped) >= 3:
-            await self._execute_assistant_task(
-                message,
-                self._assistant_tasks.respond_helpfully,
-                stripped,
-                "Ответь честно и по-человечески.",
-            )
-            return True
 
         return False
 
