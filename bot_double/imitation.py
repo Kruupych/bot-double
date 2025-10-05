@@ -117,7 +117,13 @@ class ImitationToolkit:
 
     # ----------------------------------------------------------- text processing ---
     def strip_call_signs(self, text: str) -> str:
-        patterns = [r"^бот[:,\s]*", r"^двойник[:,\s]*"]
+        punctuation = r":,;/\s\-–—"
+        patterns = [
+            rf"^бот[{punctuation}]*двойник[{punctuation}]*",
+            rf"^двойник[{punctuation}]*бот[{punctuation}]*",
+            rf"^бот[{punctuation}]*",
+            rf"^двойник[{punctuation}]*",
+        ]
         if self._bot_username:
             patterns.append(rf"@{re.escape(self._bot_username)}")
         if self._bot_name:
