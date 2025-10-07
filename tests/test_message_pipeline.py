@@ -4,8 +4,12 @@ import sys
 import types
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import List, Optional, Tuple
 
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
 telegram_stub = types.ModuleType("telegram")
 
@@ -104,8 +108,11 @@ class DummyBot:
         self.db = self._db
         self._bot_id: Optional[int] = None
         self._bot_user_id: Optional[int] = None
+        self._bot_name: Optional[str] = None
+        self._bot_username: Optional[str] = None
         self.pair_calls: List[Tuple[DummyMessage, int, str]] = []
         self.persona_calls: List[Tuple[int, int, int]] = []
+        self.force_direct_address: bool = False
 
     async def _run_db(self, func, *args, **kwargs):  # noqa: ANN001 - signature matches bot
         return func(*args, **kwargs)
@@ -130,6 +137,9 @@ class DummyBot:
 
     async def _maybe_transcribe_voice_message(self, message: DummyMessage) -> Optional[str]:
         return None
+
+    def _is_direct_address(self, message: DummyMessage, lowered_text: str) -> bool:
+        return self.force_direct_address
 
 
 class MessagePipelineCarryoverTests(unittest.IsolatedAsyncioTestCase):
@@ -197,6 +207,28 @@ class MessagePipelineCarryoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.pipeline._carryover[key].texts, ["fine today"])
         self.assertEqual(len(self.bot.persona_calls), 1)
         self.assertEqual(self.bot.persona_calls[0][0], 9)
+
+    async def test_direct_address_stored_as_context_only(self) -> None:
+        user = DummyUser(telegram_id=404)
+        message = DummyMessage(
+            "бот привет как дела",
+            user,
+            chat_id=11,
+            timestamp=10,
+        )
+        self.bot.force_direct_address = True
+
+        result = await self.pipeline.capture_message(message)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(len(self.bot.db.messages), 1)
+        chat_id, user_id, text, _, context_only = self.bot.db.messages[0]
+        self.assertEqual(chat_id, 11)
+        self.assertEqual(user_id, self.bot.db.users[user.id])
+        self.assertEqual(text, "бот привет как дела")
+        self.assertTrue(context_only)
+        self.assertEqual(len(self.bot.pair_calls), 0)
+        self.assertEqual(len(self.bot.persona_calls), 0)
 
 
 if __name__ == "__main__":  # pragma: no cover - manual execution helper

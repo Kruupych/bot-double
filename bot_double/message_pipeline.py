@@ -20,6 +20,7 @@ class CarryoverBuffer:
     last_message: Message
     last_timestamp: int
     user_id: int
+    context_only: bool
 
 
 class MessagePipeline:
@@ -71,6 +72,13 @@ class MessagePipeline:
         text = text.strip()
         if not text:
             return None
+        lowered = text.lower()
+
+        store_context_only = self._bot._is_direct_address(message, lowered)
+        if not store_context_only and message.reply_to_message and message.reply_to_message.from_user:
+            reply_user = message.reply_to_message.from_user
+            if bot_id is not None and reply_user.id == bot_id:
+                store_context_only = True
 
         if text_source_voice:
             if text.startswith(('/', '!', '.')):
@@ -79,7 +87,6 @@ class MessagePipeline:
             should_store = should_store_context_snippet(
                 text, min_tokens=self._bot._settings.min_tokens_to_store
             )
-            lowered = text.lower()
             bufferable = (
                 not should_store
                 and "http://" not in lowered
@@ -96,6 +103,9 @@ class MessagePipeline:
                 allowed_bot_id=bot_id,
             )
 
+        if store_context_only:
+            bufferable = False
+
         if should_store:
             await self.flush_buffer_for_key(key)
             await self._store_fragments(
@@ -104,6 +114,7 @@ class MessagePipeline:
                 message,
                 user_id,
                 timestamp,
+                context_only=store_context_only,
             )
         elif bufferable:
             await self._append_to_burst(
@@ -158,6 +169,7 @@ class MessagePipeline:
             burst.last_message,
             burst.user_id,
             burst.last_timestamp,
+            context_only=False,
         )
 
     async def flush_all_buffers(self) -> None:
@@ -215,19 +227,30 @@ class MessagePipeline:
         timestamp: int,
         *,
         force: bool = False,
+        context_only: bool = False,
     ) -> None:
         if not fragments:
             return
         carryover = self._carryover.pop(key, None)
         pieces: List[str] = []
         if carryover and carryover.texts:
-            if self._carryover_is_expired(carryover, timestamp):
+            if carryover.context_only != context_only:
                 await self._persist_text(
                     carryover.texts,
                     carryover.last_message,
                     carryover.user_id,
                     carryover.last_timestamp,
                     force=True,
+                    context_only=carryover.context_only,
+                )
+            elif self._carryover_is_expired(carryover, timestamp):
+                await self._persist_text(
+                    carryover.texts,
+                    carryover.last_message,
+                    carryover.user_id,
+                    carryover.last_timestamp,
+                    force=True,
+                    context_only=carryover.context_only,
                 )
             else:
                 pieces.extend(carryover.texts)
@@ -238,6 +261,7 @@ class MessagePipeline:
             user_id,
             timestamp,
             force=force,
+            context_only=context_only,
         )
         if not stored:
             self._carryover[key] = CarryoverBuffer(
@@ -245,6 +269,7 @@ class MessagePipeline:
                 last_message=message,
                 last_timestamp=timestamp,
                 user_id=user_id,
+                context_only=context_only,
             )
 
     async def _persist_text(
@@ -255,6 +280,7 @@ class MessagePipeline:
         timestamp: int,
         *,
         force: bool,
+        context_only: bool,
     ) -> bool:
         combined_text = " ".join(fragments).strip()
         if not combined_text:
@@ -274,10 +300,11 @@ class MessagePipeline:
             user_id,
             combined_text,
             timestamp,
-            context_only=False,
+            context_only=context_only,
         )
-        await self._bot._update_pair_interactions(message, user_id, combined_text)
-        await self._bot._note_persona_message(chat_id, user_id, timestamp)
+        if not context_only:
+            await self._bot._update_pair_interactions(message, user_id, combined_text)
+            await self._bot._note_persona_message(chat_id, user_id, timestamp)
         return True
 
     def _carryover_is_expired(
@@ -300,6 +327,7 @@ class MessagePipeline:
             buffer.user_id,
             buffer.last_timestamp,
             force=force,
+            context_only=buffer.context_only,
         )
         if not stored:
             self._carryover[key] = buffer
