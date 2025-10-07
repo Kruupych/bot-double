@@ -152,6 +152,13 @@ class StyleEngine:
                 )
             requester_section += "\n\n"
 
+        rules_section = (
+            "Правила:\n"
+            "- Отвечай так, будто сообщение написал сам пользователь, чью манеру ты имитируешь.\n"
+            "- Не цитируй дословно и не копируй реплики или формулировки из запроса.\n"
+            "- Реагируй по смыслу: добавляй детали, эмоции и ход мысли, характерные для стиля пользователя.\n\n"
+        )
+
         prompt = (
             f"Собери ответ в стиле пользователя {display_name}"
             f" (username: @{username}).\n\n"
@@ -162,6 +169,7 @@ class StyleEngine:
             f"{context_section}"
             f"{peer_section}"
             f"{requester_section}"
+            f"{rules_section}"
             f"{self._gender_instruction(persona_gender)}"
             f"{starter.strip()}\n\n"
             "Ответ:"
