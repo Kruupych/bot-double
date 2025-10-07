@@ -874,9 +874,6 @@ class BotDouble:
                     joined = ", ".join(str(item) for item in speech_traits if item)
                     if joined:
                         lines.append(f"Речевые привычки: {joined}")
-                tips = str(data.get("writing_tips", "")).strip()
-                if tips and tips.lower() != "unknown":
-                    lines.append(f"Советы по стилю: {tips}")
         persona_card = "\n".join(lines).strip()
         return persona_card or None
 
@@ -1234,15 +1231,21 @@ class BotDouble:
         if not result:
             return
 
+        result.pop("writing_tips", None)
+
         summary = str(result.get("overall_summary", "")).strip()
-        if not summary:
-            summary = str(result.get("writing_tips", "")).strip()
         if not summary:
             interests = result.get("interests") or []
             if isinstance(interests, list) and interests:
                 joined = ", ".join(str(item) for item in interests if item)
                 if joined:
                     summary = f"Интересы: {joined}."
+        if not summary:
+            traits = result.get("speech_traits") or []
+            if isinstance(traits, list) and traits:
+                joined = ", ".join(str(item) for item in traits if item)
+                if joined:
+                    summary = f"Речевые привычки: {joined}."
         if not summary:
             summary = "Карточка персоны обновлена."
 

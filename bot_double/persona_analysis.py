@@ -60,7 +60,7 @@ class PersonaAnalyzer:
             " Верни структуру в формате JSON с полями:"
             " {\"overall_summary\": string, \"interests\": array,"
             " \"humor_style\": string, \"emotionality\": string, \"tonality\": string,"
-            " \"speech_traits\": array, \"writing_tips\": string}."
+            " \"speech_traits\": array}."
             " Массивы заполняй строками. Если данных не хватает, используй значение 'unknown'."
         )
 
