@@ -607,12 +607,16 @@ class BotDouble:
         self, chat_id: int, user_id: int, samples: list[str]
     ) -> tuple[Optional[str], Optional[str]]:
         mode = await self._run_db(self._db.get_persona_preference, chat_id, user_id)
-        # 0=summary, 1=card, 2=auto
+        # 0=summary, 1=card, 2=auto, 3=combined
         if mode == 0:
             return None, build_style_summary(samples)
         if mode == 1:
             card = await self._get_persona_card(chat_id, user_id)
             return card, None if card else build_style_summary(samples)
+        if mode == 3:
+            card = await self._get_persona_card(chat_id, user_id)
+            summary = build_style_summary(samples)
+            return card, summary
         # auto
         card = await self._get_persona_card(chat_id, user_id)
         return card, None if card else build_style_summary(samples)

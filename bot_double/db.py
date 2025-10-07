@@ -209,8 +209,8 @@ class Database:
 
     # --- persona preferences ---------------------------------------------------------
     def set_persona_preference(self, chat_id: int, user_id: int, mode: int) -> None:
-        if mode not in (0, 1, 2):
-            raise ValueError("mode must be 0 (summary), 1 (card), or 2 (auto)")
+        if mode not in (0, 1, 2, 3):
+            raise ValueError("mode must be 0 (summary), 1 (card), 2 (auto), or 3 (combined)")
         with self._lock, self._conn:
             self._conn.execute(
                 """

@@ -122,7 +122,9 @@ class CommandService:
         if message is None or chat is None:
             return
         if len(context.args) < 2:
-            await message.reply_text("Использование: /persona_mode @username <card|summary|auto>")
+            await message.reply_text(
+                "Использование: /persona_mode @username <card|summary|combined|auto>"
+            )
             return
         username_token, mode_token = context.args[0], context.args[1].lower().strip()
         if not username_token.startswith("@"):
@@ -134,9 +136,11 @@ class CommandService:
             await message.reply_text(f"Я ещё не знаю пользователя @{username}.")
             return
         internal_id = int(row["id"])
-        mode_map = {"summary": 0, "card": 1, "auto": 2}
+        mode_map = {"summary": 0, "card": 1, "auto": 2, "combined": 3}
         if mode_token not in mode_map:
-            await message.reply_text("Режим должен быть одним из: card, summary, auto")
+            await message.reply_text(
+                "Режим должен быть одним из: card, summary, combined, auto"
+            )
             return
         await self._run_db(
             self._db.set_persona_preference, chat.id, internal_id, mode_map[mode_token]
