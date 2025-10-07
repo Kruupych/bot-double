@@ -157,6 +157,7 @@ class BotDouble:
             run_db=self._run_db,
             invalidate_alias_cache=self._invalidate_alias_cache,
             get_persona_card=self._get_persona_card,
+            get_style_summary=self._get_style_summary,
             get_relationship_summary_text=self._get_relationship_summary_text,
             ensure_internal_user=self._ensure_internal_user,
             flush_buffers_for_chat=self._message_pipeline.flush_buffers_for_chat,
@@ -880,6 +881,13 @@ class BotDouble:
                         lines.append(f"Речевые привычки: {joined}")
         persona_card = "\n".join(lines).strip()
         return persona_card or None
+
+    async def _get_style_summary(self, chat_id: int, user_id: int) -> Optional[str]:
+        samples = await self._collect_style_samples(chat_id, user_id)
+        if not samples:
+            return None
+        summary = build_style_summary(samples).strip()
+        return summary or None
 
     async def _get_relationship_summary_text(
         self, chat_id: int, speaker_id: int, target_id: int

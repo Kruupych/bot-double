@@ -26,6 +26,7 @@ class CommandService:
         run_db: RunDB,
         invalidate_alias_cache: Callable[[Optional[int]], None],
         get_persona_card: Callable[[int, int], Awaitable[Optional[str]]],
+        get_style_summary: Callable[[int, int], Awaitable[Optional[str]]],
         get_relationship_summary_text: Callable[[int, int, int], Awaitable[Optional[str]]],
         ensure_internal_user: Callable[[Optional[User]], Awaitable[Optional[int]]],
         flush_buffers_for_chat: Callable[[int], Awaitable[None]],
@@ -35,6 +36,7 @@ class CommandService:
         self._run_db = run_db
         self._invalidate_alias_cache = invalidate_alias_cache
         self._get_persona_card = get_persona_card
+        self._get_style_summary = get_style_summary
         self._get_relationship_summary_text = get_relationship_summary_text
         self._ensure_internal_user = ensure_internal_user
         self._flush_buffers_for_chat = flush_buffers_for_chat
@@ -218,6 +220,8 @@ class CommandService:
         if not message or not chat or message.from_user is None:
             return
 
+        await self._flush_buffers_for_chat(chat.id)
+
         requester = message.from_user
         requester_internal_id = await self._ensure_internal_user(requester)
         if requester_internal_id is None:
@@ -267,13 +271,36 @@ class CommandService:
         )
 
         persona_card = await self._get_persona_card(chat.id, target_internal_id)
-        response_lines = [f"Профиль {target_name}:"]
-        if persona_card:
-            response_lines.append(persona_card)
-        else:
-            response_lines.append("Карточка персоны ещё не готова. Продолжайте общаться!")
+        style_summary = await self._get_style_summary(chat.id, target_internal_id)
 
-        relationship_lines = []
+        response_lines = [f"📇 Профиль {target_name}"]
+
+        def add_section(title: str, body: Sequence[str]) -> None:
+            response_lines.append("")
+            response_lines.append(title)
+            response_lines.extend(body if body else [])
+
+        def indent_block(text: str) -> list[str]:
+            lines = text.splitlines()
+            if not lines:
+                return []
+            return [f"  {line}" if line else "" for line in lines]
+
+        persona_body: Sequence[str]
+        if persona_card:
+            persona_body = indent_block(persona_card)
+        else:
+            persona_body = ["  Карточка ещё не готова — продолжайте общаться."]
+        add_section("🧬 Карточка персоны", persona_body)
+
+        summary_body: Sequence[str]
+        if style_summary:
+            summary_body = indent_block(style_summary)
+        else:
+            summary_body = ["  Данных пока недостаточно для алгоритмического анализа."]
+        add_section("📊 Алгоритмический разбор", summary_body)
+
+        relationship_entries: list[str] = []
         if relationship_target_internal_id is not None:
             summary = await self._get_relationship_summary_text(
                 chat.id, target_internal_id, relationship_target_internal_id
@@ -291,32 +318,28 @@ class CommandService:
                 else "неизвестный пользователь"
             )
             if summary:
-                relationship_lines.append(f"Отношение к {other_name}: {summary}")
+                relationship_entries.append(f"  → {other_name}: {summary}")
             else:
-                relationship_lines.append(
-                    f"Отношение к {other_name}: данных пока мало."
-                )
+                relationship_entries.append(f"  → {other_name}: данных пока мало.")
             reverse = await self._get_relationship_summary_text(
                 chat.id, relationship_target_internal_id, target_internal_id
             )
             if reverse:
-                relationship_lines.append(f"Ответная позиция {other_name}: {reverse}")
+                relationship_entries.append(f"  ← {other_name}: {reverse}")
         elif target_internal_id != requester_internal_id:
             summary = await self._get_relationship_summary_text(
                 chat.id, requester_internal_id, target_internal_id
             )
             if summary:
-                response_lines.append("")
-                response_lines.append(f"Вы о {target_name}: {summary}")
+                relationship_entries.append(f"  Вы о {target_name}: {summary}")
             reverse = await self._get_relationship_summary_text(
                 chat.id, target_internal_id, requester_internal_id
             )
             if reverse:
-                response_lines.append(f"{target_name} о вас: {reverse}")
+                relationship_entries.append(f"  {target_name} о вас: {reverse}")
 
-        if relationship_lines:
-            response_lines.append("")
-            response_lines.extend(relationship_lines)
+        if relationship_entries:
+            add_section("🤝 Отношения", relationship_entries)
 
         text = "\n".join(line for line in response_lines if line is not None)
         await message.reply_text(text or "Нет данных", disable_web_page_preview=True)
