@@ -175,6 +175,7 @@ class BotDouble:
             relationship_hint_for_addressee=self._relationship_hint_for_addressee,
             ensure_internal_user=self._ensure_internal_user,
             get_persona_card=self._get_persona_card,
+            get_dialog_context=self._get_dialog_context,
             resolve_user_descriptor=self._resolve_user_descriptor,
         )
 

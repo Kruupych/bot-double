@@ -31,6 +31,7 @@ CollectRequesterProfile = Callable[[int, Optional[User], int], Awaitable[Optiona
 RelationshipHintForAddressee = Callable[[int, int, Optional[int], str], Awaitable[Optional[str]]]
 EnsureInternalUser = Callable[[Optional[User]], Awaitable[Optional[int]]]
 GetPersonaCard = Callable[[int, int], Awaitable[Optional[str]]]
+GetDialogContext = Callable[[int], Awaitable[Optional[List[ContextMessage]]]]
 ResolveUserDescriptor = Callable[
     [Optional[int], str],
     Awaitable[Tuple[Optional[sqlite3.Row], List[Tuple[sqlite3.Row, float]]]],
@@ -55,6 +56,7 @@ class ImitationService:
         relationship_hint_for_addressee: RelationshipHintForAddressee,
         ensure_internal_user: EnsureInternalUser,
         get_persona_card: GetPersonaCard,
+        get_dialog_context: GetDialogContext,
         resolve_user_descriptor: ResolveUserDescriptor,
     ) -> None:
         self._settings = settings
@@ -70,6 +72,7 @@ class ImitationService:
         self._ensure_internal_user = ensure_internal_user
         self._get_persona_card = get_persona_card
         self._recent_targets: Dict[Tuple[int, int], int] = {}
+        self._get_dialog_context = get_dialog_context
         self._resolve_user_descriptor = resolve_user_descriptor
 
     async def imitate_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -329,6 +332,10 @@ class ImitationService:
         )
         persona_name = chain.persona_name
         context_messages: Optional[List[ContextMessage]] = None
+        if message.chat_id is not None:
+            has_persona_history = any(entry.is_persona for entry in chain.messages)
+            if not has_persona_history:
+                context_messages = await self._get_dialog_context(message.chat_id)
         peer_profiles = await self._collect_peer_profiles(chat.id, user_id)
         requester_profile = await self._collect_requester_profile(
             chat.id, message.from_user, user_id
