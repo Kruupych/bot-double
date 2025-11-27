@@ -1011,6 +1011,8 @@ def run_bot(settings: Settings) -> None:
     application.add_handler(CommandHandler("dialogue", bot.imitation.dialogue_command))
     application.add_handler(CommandHandler("roast", bot.imitation.roast_command))
     application.add_handler(CommandHandler("compatibility", bot.imitation.compatibility_command))
+    application.add_handler(CommandHandler("story", bot.imitation.story_command))
+    application.add_handler(CommandHandler("long_story", bot.imitation.long_story_command))
     application.add_handler(CommandHandler("profile", bot.commands.profile_command))
     application.add_handler(CommandHandler("me", bot.commands.profile_command))
     application.add_handler(CommandHandler("forgetme", bot.forget_me))

@@ -17,6 +17,9 @@ from .prompts import (
     REQUESTER_SELF_INSTRUCTION,
     ROAST_INSTRUCTIONS,
     ROAST_SYSTEM,
+    STORY_LONG_INSTRUCTIONS,
+    STORY_SHORT_INSTRUCTIONS,
+    STORY_SYSTEM,
 )
 
 
@@ -52,6 +55,15 @@ class DialogueParticipant:
     style_summary: Optional[str]
     persona_card: Optional[str]
     relationship_hint: Optional[str]
+
+
+@dataclass(slots=True)
+class StoryCharacter:
+    """Character data for story generation."""
+    name: str
+    username: str
+    samples: List[StyleSample]
+    style_summary: Optional[str] = None
 
 
 class StyleEngine:
@@ -332,6 +344,78 @@ class StyleEngine:
                 {
                     "role": "system",
                     "content": COMPATIBILITY_SYSTEM,
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            **kwargs,
+        )
+        return response.output_text.strip()
+
+    def generate_story(
+        self,
+        characters: List[StoryCharacter],
+        topic: Optional[str] = None,
+        *,
+        long_version: bool = False,
+        reasoning_effort: Optional[str] = None,
+    ) -> str:
+        """
+        Generate a short story with chat participants as characters.
+        
+        Args:
+            characters: List of StoryCharacter with their speech samples
+            topic: Optional story theme/setting
+            long_version: If True, generate longer story (4000-6000 chars)
+            reasoning_effort: Override reasoning effort for this call
+        """
+        if len(characters) < 2:
+            raise ValueError("Story needs at least 2 characters")
+        
+        # Build character descriptions
+        char_sections: List[str] = []
+        for char in characters:
+            sample_block = "\n".join(f"- {s.text}" for s in char.samples)
+            if not sample_block:
+                continue
+            section = f"👤 {char.name} (@{char.username}):\n"
+            section += f"Примеры речи:\n{sample_block}"
+            if char.style_summary:
+                section += f"\nХарактеристика стиля: {char.style_summary}"
+            char_sections.append(section)
+        
+        if len(char_sections) < 2:
+            raise ValueError("Not enough characters with samples for story")
+        
+        character_names = ", ".join(c.name for c in characters)
+        topic_text = topic.strip() if topic else "на усмотрение автора"
+        
+        instructions = STORY_LONG_INSTRUCTIONS if long_version else STORY_SHORT_INSTRUCTIONS
+        
+        prompt = (
+            f"Напиши рассказ с персонажами: {character_names}.\n"
+            f"Тема/сеттинг: {topic_text}.\n\n"
+            "Персонажи и их стиль общения:\n\n"
+            + "\n\n".join(char_sections)
+            + f"\n\n{instructions}"
+        )
+        
+        kwargs: dict[str, object] = {}
+        # Use provided reasoning_effort, fall back to instance default
+        effort = reasoning_effort or self._reasoning_effort
+        if effort:
+            kwargs["reasoning"] = {"effort": effort}
+        if self._text_verbosity:
+            kwargs["text"] = {"verbosity": self._text_verbosity}
+        
+        response = self._client.responses.create(
+            model=self._model,
+            input=[
+                {
+                    "role": "system",
+                    "content": STORY_SYSTEM,
                 },
                 {
                     "role": "user",

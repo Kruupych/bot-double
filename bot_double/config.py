@@ -17,6 +17,7 @@ class Settings:
     db_path: Path
     openai_model: str = "gpt-5-nano"
     openai_reasoning_effort: Optional[str] = None
+    openai_story_reasoning_effort: Optional[str] = None
     openai_text_verbosity: Optional[str] = None
     auto_imitate_probability: float = 0.2
     min_messages_for_profile: int = 20
@@ -102,14 +103,23 @@ def load_settings() -> Settings:
     db_path = Path(os.getenv("BOT_DOUBLE_DB_PATH", "bot_double.db"))
     openai_model = os.getenv("OPENAI_MODEL", "gpt-5-nano")
     reasoning_effort = os.getenv("OPENAI_REASONING_EFFORT")
+    allowed_efforts = {"none", "minimal", "low", "medium", "high"}
     if reasoning_effort:
-        allowed_efforts = {"none", "minimal", "low", "medium", "high"}
         if reasoning_effort not in allowed_efforts:
             raise SettingsError(
                 "OPENAI_REASONING_EFFORT must be one of none, minimal, low, medium, high"
             )
     else:
         reasoning_effort = None
+
+    story_reasoning_effort = os.getenv("OPENAI_STORY_REASONING_EFFORT")
+    if story_reasoning_effort:
+        if story_reasoning_effort not in allowed_efforts:
+            raise SettingsError(
+                "OPENAI_STORY_REASONING_EFFORT must be one of none, minimal, low, medium, high"
+            )
+    else:
+        story_reasoning_effort = None
 
     text_verbosity = os.getenv("OPENAI_TEXT_VERBOSITY")
     if text_verbosity:
@@ -187,6 +197,7 @@ def load_settings() -> Settings:
         db_path=db_path,
         openai_model=openai_model,
         openai_reasoning_effort=reasoning_effort,
+        openai_story_reasoning_effort=story_reasoning_effort,
         openai_text_verbosity=text_verbosity,
         auto_imitate_probability=probability,
         min_messages_for_profile=min_messages,

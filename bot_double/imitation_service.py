@@ -18,10 +18,11 @@ from .style_engine import (
     DialogueParticipant,
     ParticipantProfile,
     RequesterProfile,
+    StoryCharacter,
     StyleEngine,
     StyleSample,
 )
-from .utils import display_name, guess_gender
+from .utils import display_name, guess_gender, send_long_text
 
 T = TypeVar("T")
 RunDB = Callable[..., Awaitable[T]]
@@ -449,6 +450,148 @@ class ImitationService:
                 username_b,
                 style_samples_b,
                 style_summary_b,
+            ),
+        )
+
+    async def story_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Generate a short story with chat participants as characters."""
+        await self._handle_story_command(update, context, long_version=False)
+
+    async def long_story_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Generate a longer story with chat participants as characters."""
+        await self._handle_story_command(update, context, long_version=True)
+
+    async def _handle_story_command(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        long_version: bool,
+    ) -> None:
+        """Common handler for story and long_story commands."""
+        message = update.effective_message
+        chat = update.effective_chat
+        if not message or not chat:
+            return
+
+        # Parse arguments: /story @user1 @user2 ... [тема]
+        if not context.args or len(context.args) < 2:
+            cmd = "/long_story" if long_version else "/story"
+            await message.reply_text(
+                f"Использование: {cmd} @user1 @user2 [@user3...] [тема]\n"
+                "Минимум 2 участника."
+            )
+            return
+
+        # Separate usernames from topic
+        usernames: List[str] = []
+        topic_parts: List[str] = []
+        for arg in context.args:
+            if arg.startswith("@"):
+                usernames.append(arg.lstrip("@"))
+            else:
+                topic_parts.append(arg)
+
+        if len(usernames) < 2:
+            await message.reply_text("Нужно минимум 2 участника (@user1 @user2).")
+            return
+
+        if len(usernames) > 5:
+            await message.reply_text("Максимум 5 участников для истории.")
+            return
+
+        topic = " ".join(topic_parts).strip() if topic_parts else None
+
+        # Resolve all users
+        user_rows: List[sqlite3.Row] = []
+        for username in usernames:
+            row = await self._run_db(self._db.get_user_by_username, username)
+            if row is None:
+                await message.reply_text(f"Я ещё не знаю пользователя @{username}.")
+                return
+            user_rows.append(row)
+
+        # Check message counts and collect data
+        min_required = self._settings.min_messages_for_profile
+        characters: List[StoryCharacter] = []
+
+        for row in user_rows:
+            internal_id = int(row["id"])
+            persona_name = display_name(
+                row["username"], row["first_name"], row["last_name"]
+            )
+
+            count = await self._run_db(self._db.get_message_count, chat.id, internal_id)
+            if count < min_required:
+                await message.reply_text(
+                    f"Мне нужно больше сообщений от {persona_name} "
+                    f"(минимум {min_required})."
+                )
+                return
+
+            samples = await self._collect_style_samples(chat.id, internal_id, topic_hint="")
+            if not samples:
+                await message.reply_text(f"Недостаточно сообщений от {persona_name}.")
+                return
+
+            _, style_summary = await self._choose_persona_artifacts(
+                chat.id, internal_id, samples
+            )
+
+            characters.append(StoryCharacter(
+                name=persona_name,
+                username=row["username"] or f"user{internal_id}",
+                samples=[StyleSample(text=s) for s in samples],
+                style_summary=style_summary,
+            ))
+
+        # Generate the story
+        story_type = "развёрнутую историю" if long_version else "историю"
+        await message.reply_text(f"✍️ Пишу {story_type}...")
+
+        try:
+            story_text = await self._generate_story(
+                characters,
+                topic,
+                long_version=long_version,
+            )
+        except Exception:
+            await message.reply_text(
+                "Не удалось сгенерировать историю. Попробуйте позже."
+            )
+            return
+
+        # Add header
+        char_names = " & ".join(c.name for c in characters)
+        header = f"📖 {'Рассказ' if long_version else 'История'}: {char_names}\n\n"
+
+        # Send with smart splitting / document fallback
+        await send_long_text(
+            message,
+            header + story_text,
+            document_threshold=6000,
+            document_filename="story.txt",
+            document_caption=f"📖 {char_names}",
+        )
+
+    async def _generate_story(
+        self,
+        characters: List[StoryCharacter],
+        topic: Optional[str],
+        *,
+        long_version: bool,
+    ) -> str:
+        """Call StyleEngine to generate a story."""
+        # Get story-specific reasoning effort from settings
+        story_reasoning = self._settings.openai_story_reasoning_effort
+
+        return await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: self._style.generate_story(
+                characters,
+                topic,
+                long_version=long_version,
+                reasoning_effort=story_reasoning,
             ),
         )
 
