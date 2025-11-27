@@ -566,10 +566,12 @@ class ImitationService:
         header = f"📖 {'Рассказ' if long_version else 'История'}: {char_names}\n\n"
 
         # Send with smart splitting / document fallback
+        # Long stories: 8000 chars threshold, short stories: 6000
+        doc_threshold = 8000 if long_version else 6000
         await send_long_text(
             message,
             header + story_text,
-            document_threshold=6000,
+            document_threshold=doc_threshold,
             document_filename="story.txt",
             document_caption=f"📖 {char_names}",
         )
