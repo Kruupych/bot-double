@@ -103,10 +103,10 @@ def load_settings() -> Settings:
     openai_model = os.getenv("OPENAI_MODEL", "gpt-5-nano")
     reasoning_effort = os.getenv("OPENAI_REASONING_EFFORT")
     if reasoning_effort:
-        allowed_efforts = {"minimal", "low", "medium", "high"}
+        allowed_efforts = {"none", "minimal", "low", "medium", "high"}
         if reasoning_effort not in allowed_efforts:
             raise SettingsError(
-                "OPENAI_REASONING_EFFORT must be one of minimal, low, medium, high"
+                "OPENAI_REASONING_EFFORT must be one of none, minimal, low, medium, high"
             )
     else:
         reasoning_effort = None

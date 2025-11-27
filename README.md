@@ -33,7 +33,7 @@ Telegram-бот, который автоматически собирает со
    | `PEER_PROFILE_COUNT` | сколько «соседей» собирать для бэкграунда | `3` |
    | `PEER_PROFILE_SAMPLES` | сколько сообщений брать у каждого соседа | `2` |
    | `OPENAI_MODEL` | модель для имитаций | `gpt-5-nano` |
-   | `OPENAI_REASONING_EFFORT` | усилие рассуждений (`minimal/low/medium/high`) | пусто (выкл) |
+   | `OPENAI_REASONING_EFFORT` | усилие рассуждений (`none/minimal/low/medium/high`) | пусто (выкл) |
    | `OPENAI_TEXT_VERBOSITY` | многословность (`low/medium/high`) | пусто (дефолт модели) |
    | `MIN_TOKENS_TO_STORE` | минимальное число слов для мгновенного сохранения | `3` |
    | `SHORT_MESSAGE_BUFFER_SECONDS` | таймаут старой буферизации (используется как дефолт для бёрстов) | `10` |
