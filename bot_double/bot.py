@@ -728,7 +728,7 @@ class BotDouble:
     ) -> None:
         if chat_id is None:
             return
-        if self._persona_analyzer is None or self._persona_queue is None:
+        if self._persona_analyzer is None or self._persona_worker is None:
             return
         if self._bot_user_id is not None and user_id == self._bot_user_id:
             return
