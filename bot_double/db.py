@@ -781,74 +781,28 @@ class Database:
         return cursor.fetchall()
 
     def _ensure_schema(self) -> None:
+        """
+        Initialize the database schema.
+        
+        The main SCHEMA constant defines all tables and indexes.
+        The _maybe_add_column calls handle migrations for columns added in later versions.
+        """
         with self._conn:
             self._conn.executescript(SCHEMA)
+            # Migration: add context_only column to messages table
             self._maybe_add_column(
                 "messages",
                 "context_only",
                 "INTEGER NOT NULL DEFAULT 0",
             )
-            self._conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS pair_interactions (
-                    chat_id INTEGER NOT NULL,
-                    speaker_id INTEGER NOT NULL,
-                    target_id INTEGER NOT NULL,
-                    total_count INTEGER NOT NULL DEFAULT 0,
-                    informal_count INTEGER NOT NULL DEFAULT 0,
-                    formal_count INTEGER NOT NULL DEFAULT 0,
-                    teasing_count INTEGER NOT NULL DEFAULT 0,
-                    sample_messages TEXT,
-                    pending_messages INTEGER NOT NULL DEFAULT 0,
-                    last_analyzed_at INTEGER,
-                    analysis_summary TEXT,
-                    analysis_details TEXT,
-                    PRIMARY KEY (chat_id, speaker_id, target_id),
-                    FOREIGN KEY(speaker_id) REFERENCES users(id) ON DELETE CASCADE,
-                    FOREIGN KEY(target_id) REFERENCES users(id) ON DELETE CASCADE
-                )
-                """
-            )
-            self._conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS pair_interaction_messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    chat_id INTEGER NOT NULL,
-                    speaker_id INTEGER NOT NULL,
-                    target_id INTEGER NOT NULL,
-                    text TEXT NOT NULL,
-                    timestamp INTEGER NOT NULL,
-                    FOREIGN KEY(speaker_id) REFERENCES users(id) ON DELETE CASCADE,
-                    FOREIGN KEY(target_id) REFERENCES users(id) ON DELETE CASCADE
-                )
-                """
-            )
-            self._conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_pair_messages_lookup
-                ON pair_interaction_messages(chat_id, speaker_id, target_id, timestamp DESC)
-                """
-            )
-            self._conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS persona_profiles (
-                    chat_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    summary TEXT,
-                    details TEXT,
-                    pending_messages INTEGER NOT NULL DEFAULT 0,
-                    last_analyzed_at INTEGER,
-                    PRIMARY KEY (chat_id, user_id),
-                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-                )
-                """
-            )
+            # Migration: add columns to persona_profiles table
             self._maybe_add_column(
                 "persona_profiles", "pending_messages", "INTEGER NOT NULL DEFAULT 0"
             )
             self._maybe_add_column(
                 "persona_profiles", "last_analyzed_at", "INTEGER"
             )
+            # Migration: add columns to pair_interactions table
             self._maybe_add_column(
                 "pair_interactions", "pending_messages", "INTEGER NOT NULL DEFAULT 0"
             )

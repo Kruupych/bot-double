@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import difflib
 import io
 import json
 import logging
@@ -10,7 +9,7 @@ import re
 import sqlite3
 import time
 from functools import partial
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, TypeVar
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TypeVar
 
 from telegram import Message, Update, User
 from telegram.ext import (
@@ -25,11 +24,13 @@ from telegram.ext import (
 
 from .burst_manager import BurstManager
 from .command_service import CommandService
-from .imitation_service import ImitationService
-from .message_pipeline import MessagePipeline
 from .config import Settings
 from .db import Database
 from .imitation import ImitationChain, ImitationToolkit
+from .imitation_service import ImitationService
+from .message_pipeline import MessagePipeline
+from .persona_worker import PersonaAnalysisWorker
+from .relationship_worker import RelationshipAnalysisWorker
 from .style_engine import (
     ContextMessage,
     ParticipantProfile,
@@ -41,55 +42,18 @@ from .relationship_analysis import (
     build_relationship_hint,
     evaluate_interaction,
 )
-from .social_analysis import InteractionExcerpt, SocialAnalyzer
-from .persona_analysis import PersonaAnalyzer, PersonaSample
+from .social_analysis import SocialAnalyzer
+from .persona_analysis import PersonaAnalyzer
 from .style_analysis import build_style_summary
 from .transcription import SpeechTranscriber
+from .user_resolver import UserResolverService
 from .utils import (
     display_name,
     guess_gender,
-    normalize_alias,
 )
 
 LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
-
-
-_CYR_TO_LAT = {
-    "а": "a",
-    "б": "b",
-    "в": "v",
-    "г": "g",
-    "д": "d",
-    "е": "e",
-    "ё": "e",
-    "ж": "zh",
-    "з": "z",
-    "и": "i",
-    "й": "y",
-    "к": "k",
-    "л": "l",
-    "м": "m",
-    "н": "n",
-    "о": "o",
-    "п": "p",
-    "р": "r",
-    "с": "s",
-    "т": "t",
-    "у": "u",
-    "ф": "f",
-    "х": "h",
-    "ц": "ts",
-    "ч": "ch",
-    "ш": "sh",
-    "щ": "shch",
-    "ъ": "",
-    "ы": "y",
-    "ь": "",
-    "э": "e",
-    "ю": "yu",
-    "я": "ya",
-}
 
 
 class BotDouble:
@@ -129,14 +93,27 @@ class BotDouble:
             flush_callback=self._message_pipeline.store_burst,
         )
         self._message_pipeline.attach_burst_manager(self._burst_manager)
-        self._analysis_queue: Optional[asyncio.Queue[Tuple[int, int, int]]] = None
-        self._analysis_inflight: Set[Tuple[int, int, int]] = set()
-        self._analysis_worker: Optional[asyncio.Task] = None
-        self._persona_queue: Optional[asyncio.Queue[Tuple[int, int]]] = None
-        self._persona_inflight: Set[Tuple[int, int]] = set()
-        self._persona_worker: Optional[asyncio.Task] = None
-        self._alias_cache: Dict[int, Dict[str, int]] = {}
-        self._alias_display_cache: Dict[int, Dict[int, List[str]]] = {}
+        self._relationship_worker = RelationshipAnalysisWorker(
+            settings=settings,
+            db=self._db,
+            run_db=self._run_db,
+            social_analyzer=self._social,
+        )
+        self._persona_worker: Optional[PersonaAnalysisWorker] = (
+            PersonaAnalysisWorker(
+                settings=settings,
+                db=self._db,
+                run_db=self._run_db,
+                persona_analyzer=self._persona_analyzer,
+            )
+            if self._persona_analyzer
+            else None
+        )
+        self._user_resolver = UserResolverService(
+            db=self._db,
+            run_db=self._run_db,
+            get_bot_user_id=lambda: self._bot_user_id,
+        )
         self._transcriber: Optional[SpeechTranscriber] = None
         self._imitation = ImitationToolkit(
             bot_name=self._bot_name,
@@ -208,16 +185,11 @@ class BotDouble:
         except Exception:
             LOGGER.exception("Failed to ensure bot profile in database")
         LOGGER.info("Bot initialized as %s (%s)", me.first_name, me.username)
-        if self._analysis_queue is None:
-            self._analysis_queue = asyncio.Queue()
-        if self._analysis_worker is None:
-            self._analysis_worker = asyncio.create_task(
-                self._relationship_analysis_worker()
-            )
-        if self._persona_analyzer is not None and self._persona_queue is None:
-            self._persona_queue = asyncio.Queue()
-        if self._persona_analyzer is not None and self._persona_worker is None:
-            self._persona_worker = asyncio.create_task(self._persona_analysis_worker())
+        # Start analysis workers
+        if not self._relationship_worker.is_running:
+            self._relationship_worker.start()
+        if self._persona_worker is not None and not self._persona_worker.is_running:
+            self._persona_worker.start()
         # Start a watchdog to flush stale bursts in case timers are cancelled
         self._burst_manager.start()
 
@@ -225,8 +197,9 @@ class BotDouble:
         LOGGER.info("Bot shutting down")
         await self._message_pipeline.flush_all_buffers()
         await self._burst_manager.stop()
-        await self._stop_analysis_worker()
-        await self._stop_persona_worker()
+        await self._relationship_worker.stop()
+        if self._persona_worker is not None:
+            await self._persona_worker.stop()
         self._db.close()
 
     # --- handlers ------------------------------------------------------------------
@@ -338,181 +311,12 @@ class BotDouble:
     async def _get_alias_maps(
         self, chat_id: int
     ) -> Tuple[Dict[str, int], Dict[int, List[str]]]:
-        if chat_id in self._alias_cache and chat_id in self._alias_display_cache:
-            return self._alias_cache[chat_id], self._alias_display_cache[chat_id]
-        rows = await self._run_db(self._db.get_aliases_for_chat, chat_id)
-        alias_map: Dict[str, int] = {}
-        display_map: Dict[int, List[str]] = {}
-        for row in rows:
-            normalized = str(row["normalized_alias"])
-            user_id = int(row["user_id"])
-            alias_map[normalized] = user_id
-            display_map.setdefault(user_id, []).append(str(row["alias"]))
-        self._alias_cache[chat_id] = alias_map
-        self._alias_display_cache[chat_id] = display_map
-        return alias_map, display_map
-
-    def _transliterate(self, text: str) -> str:
-        result_chars: List[str] = []
-        for char in text:
-            result_chars.append(_CYR_TO_LAT.get(char, char))
-        return "".join(result_chars)
-
-    def _generate_variants(self, values: Iterable[str]) -> Set[str]:
-        variants: Set[str] = set()
-        for value in values:
-            normalized = normalize_alias(value)
-            if not normalized:
-                continue
-            variants.add(normalized)
-            translit = self._transliterate(normalized)
-            if translit and translit != normalized:
-                variants.add(translit)
-        return variants
-
-    def _candidate_keys_for_user(
-        self, row: sqlite3.Row, aliases: Optional[List[str]]
-    ) -> Set[str]:
-        values: List[str] = []
-        username = row["username"]
-        first_name = row["first_name"]
-        last_name = row["last_name"]
-        if username:
-            values.append(username)
-            values.append(f"@{username}")
-        if first_name:
-            values.append(first_name)
-        if last_name:
-            values.append(last_name)
-        if first_name and last_name:
-            values.append(f"{first_name} {last_name}")
-        display = display_name(username, first_name, last_name)
-        if display:
-            values.append(display)
-        if aliases:
-            values.extend(aliases)
-        return self._generate_variants(values)
-
-    def _descriptor_variants(self, descriptor: str) -> Set[str]:
-        cleaned = descriptor.strip()
-        cleaned = re.sub(r"[\"'“”«»]+", "", cleaned)
-        candidates: List[str] = []
-        parts = re.split(r"[:;,\n\-–—]", cleaned, maxsplit=1)
-        base = parts[0].strip()
-        if base:
-            candidates.append(base)
-        tokens = base.split()
-        if len(tokens) > 1:
-            for length in range(len(tokens), 0, -1):
-                segment = " ".join(tokens[:length]).strip()
-                if segment and segment not in candidates:
-                    candidates.append(segment)
-        if cleaned and cleaned not in candidates:
-            candidates.append(cleaned)
-        variants: Set[str] = set()
-        for candidate in candidates:
-            normalized = normalize_alias(candidate)
-            if not normalized:
-                continue
-            variants.add(normalized)
-            translit = self._transliterate(normalized)
-            if translit and translit != normalized:
-                variants.add(translit)
-        return variants
-
-    def _score_descriptor(
-        self, descriptor_variants: Iterable[str], candidate_keys: Iterable[str]
-    ) -> float:
-        best = 0.0
-        candidate_list = list(candidate_keys)
-        if not candidate_list:
-            return 0.0
-        for descriptor in descriptor_variants:
-            tokens1 = set(descriptor.split())
-            for candidate in candidate_list:
-                if descriptor == candidate:
-                    return 1.0
-                if descriptor and candidate and (
-                    descriptor in candidate or candidate in descriptor
-                ):
-                    best = max(best, 0.92)
-                    continue
-                tokens2 = set(candidate.split())
-                if tokens1 and tokens1 <= tokens2:
-                    best = max(best, 0.88)
-                    continue
-                if tokens1 and tokens2:
-                    overlap = tokens1 & tokens2
-                    if overlap:
-                        ratio = len(overlap) / max(len(tokens1), len(tokens2))
-                        best = max(best, 0.65 + 0.25 * ratio)
-                        continue
-                similarity = difflib.SequenceMatcher(None, descriptor, candidate).ratio()
-                if similarity >= 0.75:
-                    best = max(best, similarity * 0.85)
-        return best
+        return await self._user_resolver.get_alias_maps(chat_id)
 
     async def _resolve_user_descriptor(
         self, chat_id: Optional[int], descriptor: str
     ) -> Tuple[Optional[sqlite3.Row], List[Tuple[sqlite3.Row, float]]]:
-        if not descriptor:
-            return None, []
-        descriptor = descriptor.strip()
-        if descriptor.startswith("@"):
-            username = descriptor.lstrip("@")
-            row = await self._run_db(self._db.get_user_by_username, username)
-            return row, []
-        if chat_id is None:
-            return None, []
-
-        alias_map, alias_display = await self._get_alias_maps(chat_id)
-        descriptor_variants = self._descriptor_variants(descriptor)
-
-        for variant in list(descriptor_variants):
-            if variant in alias_map:
-                user_id = alias_map[variant]
-                row = await self._fetch_user_row(chat_id, user_id)
-                if row:
-                    return row, []
-
-        participants = await self._run_db(self._db.get_chat_participants, chat_id)
-        rows_by_id: Dict[int, sqlite3.Row] = {
-            int(row["id"]): row for row in participants
-        }
-        # include aliased users who may not have messages yet
-        for user_id in alias_display.keys():
-            if user_id not in rows_by_id:
-                row = await self._run_db(self._db.get_user_by_id, user_id)
-                if row:
-                    rows_by_id[user_id] = row
-
-        best_candidates: List[Tuple[sqlite3.Row, float]] = []
-        best_score = 0.0
-        for user_id, row in rows_by_id.items():
-            if self._bot_user_id is not None and user_id == self._bot_user_id:
-                continue
-            aliases = alias_display.get(user_id)
-            candidate_keys = self._candidate_keys_for_user(row, aliases)
-            score = self._score_descriptor(descriptor_variants, candidate_keys)
-            if score < 0.55:
-                continue
-            if score > best_score + 0.05:
-                best_score = score
-                best_candidates = [(row, score)]
-            elif abs(score - best_score) <= 0.05:
-                best_candidates.append((row, score))
-
-        if best_score >= 0.78 and len(best_candidates) == 1:
-            return best_candidates[0][0], []
-
-        if best_candidates:
-            best_candidates.sort(key=lambda item: item[1], reverse=True)
-            return None, best_candidates[:3]
-
-        return None, []
-
-    async def _fetch_user_row(self, chat_id: int, user_id: int) -> Optional[sqlite3.Row]:
-        return await self._run_db(self._db.get_user_by_id, user_id)
+        return await self._user_resolver.resolve_user_descriptor(chat_id, descriptor)
 
     def _parse_imitation_request(
         self, instruction: str
@@ -934,65 +738,15 @@ class BotDouble:
     async def _maybe_queue_relationship_analysis(
         self, chat_id: int, speaker_id: int, target_id: int
     ) -> None:
-        if self._analysis_queue is None:
-            return
-        key = (chat_id, speaker_id, target_id)
-        if key in self._analysis_inflight:
-            return
-        stats = await self._run_db(
-            self._db.get_pair_stats,
-            chat_id,
-            speaker_id,
-            target_id,
-        )
-        if not stats:
-            return
-        pending = int(stats.get("pending_messages", 0))
-        if pending < self._settings.relationship_analysis_min_pending:
-            return
-        last_analyzed = stats.get("last_analyzed_at")
-        threshold_seconds = self._settings.relationship_analysis_min_hours * 3600
-        if (
-            threshold_seconds > 0
-            and last_analyzed is not None
-            and int(time.time()) - int(last_analyzed) < threshold_seconds
-        ):
-            return
-        await self._analysis_queue.put(key)
-        self._analysis_inflight.add(key)
+        await self._relationship_worker.maybe_queue((chat_id, speaker_id, target_id))
 
     async def _maybe_queue_persona_analysis(self, chat_id: int, user_id: int) -> None:
-        if self._persona_queue is None or self._persona_analyzer is None:
+        if self._persona_worker is None:
             return
-        key = (chat_id, user_id)
-        if key in self._persona_inflight:
-            return
-        profile = await self._run_db(
-            self._db.get_persona_profile,
-            chat_id,
-            user_id,
-        )
-        if not profile:
-            return
-        pending = int(profile.get("pending_messages", 0))
-        if pending < self._settings.persona_analysis_min_messages:
-            return
-        last_analyzed = profile.get("last_analyzed_at")
-        threshold_seconds = self._settings.persona_analysis_min_hours * 3600
-        if (
-            threshold_seconds > 0
-            and last_analyzed is not None
-            and int(time.time()) - int(last_analyzed) < threshold_seconds
-        ):
-            return
-        await self._persona_queue.put(key)
-        self._persona_inflight.add(key)
+        await self._persona_worker.maybe_queue((chat_id, user_id))
 
     def _invalidate_alias_cache(self, chat_id: Optional[int]) -> None:
-        if chat_id is None:
-            return
-        self._alias_cache.pop(chat_id, None)
-        self._alias_display_cache.pop(chat_id, None)
+        self._user_resolver.invalidate_cache(chat_id)
 
     async def _maybe_transcribe_voice_message(self, message: Message) -> Optional[str]:
         if self._transcriber is None:
@@ -1038,276 +792,6 @@ class BotDouble:
         if text:
             LOGGER.debug("Voice transcription succeeded: %s", text)
         return text
-
-    async def _relationship_analysis_worker(self) -> None:
-        assert self._analysis_queue is not None
-        try:
-            while True:
-                key = await self._analysis_queue.get()
-                try:
-                    await self._perform_relationship_analysis(*key)
-                except Exception:
-                    LOGGER.exception("Relationship analysis task failed")
-                finally:
-                    self._analysis_inflight.discard(key)
-                    self._analysis_queue.task_done()
-        except asyncio.CancelledError:
-            pass
-        finally:
-            if self._analysis_queue is not None:
-                while not self._analysis_queue.empty():
-                    try:
-                        self._analysis_queue.get_nowait()
-                        self._analysis_queue.task_done()
-                    except asyncio.QueueEmpty:
-                        break
-
-    async def _perform_relationship_analysis(
-        self, chat_id: int, speaker_id: int, target_id: int
-    ) -> None:
-        stats = await self._run_db(
-            self._db.get_pair_stats,
-            chat_id,
-            speaker_id,
-            target_id,
-        )
-        if not stats:
-            return
-        pending = int(stats.get("pending_messages", 0))
-        if pending < self._settings.relationship_analysis_min_pending:
-            return
-
-        speaker_row = await self._run_db(self._db.get_user_by_id, speaker_id)
-        target_row = await self._run_db(self._db.get_user_by_id, target_id)
-        if speaker_row is None or target_row is None:
-            return
-
-        speaker_name = display_name(
-            speaker_row["username"],
-            speaker_row["first_name"],
-            speaker_row["last_name"],
-        )
-        target_name = display_name(
-            target_row["username"],
-            target_row["first_name"],
-            target_row["last_name"],
-        )
-
-        max_samples = 20
-        rows = await self._run_db(
-            self._db.get_pair_messages,
-            chat_id,
-            speaker_id,
-            target_id,
-            max_samples,
-        )
-        if not rows:
-            return
-
-        min_required = max(
-            self._settings.relationship_analysis_min_pending, 5
-        )
-        if len(rows) < min_required:
-            return
-
-        excerpts: List[InteractionExcerpt] = []
-        for record in reversed(rows):
-            focus_text = (record["text"] or "").strip()
-            if not focus_text:
-                continue
-            focus_timestamp = int(record["timestamp"])
-            context_rows = await self._run_db(
-                self._db.get_chat_messages_before,
-                chat_id,
-                focus_timestamp,
-                3,
-            )
-            context_lines: List[str] = []
-            for ctx in context_rows[-3:]:
-                ctx_text = (ctx["text"] or "").strip()
-                if not ctx_text:
-                    continue
-                ctx_name = display_name(
-                    ctx["username"], ctx["first_name"], ctx["last_name"]
-                )
-                context_lines.append(f"{ctx_name}: {ctx_text}")
-            excerpts.append(
-                InteractionExcerpt(
-                    focus_text=focus_text,
-                    focus_timestamp=focus_timestamp,
-                    context=tuple(context_lines),
-                )
-            )
-
-        if len(excerpts) < min_required:
-            return
-
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: self._social.analyze_relationship(
-                speaker_name, target_name, tuple(excerpts)
-            ),
-        )
-        if not result:
-            return
-
-        summary = str(result.get("summary", "")).strip()
-        if not summary:
-            tone = str(result.get("tone", "unknown")).strip()
-            notes = str(result.get("emotional_notes", "unknown")).strip()
-            summary = f"Тон общения: {tone}. Эмоциональные заметки: {notes}."
-        details_json = json.dumps(result, ensure_ascii=False)
-        analyzed_at = int(time.time())
-        await self._run_db(
-            self._db.save_pair_analysis,
-            chat_id,
-            speaker_id,
-            target_id,
-            summary,
-            details_json,
-            analyzed_at,
-        )
-
-    async def _persona_analysis_worker(self) -> None:
-        assert self._persona_queue is not None
-        try:
-            while True:
-                key = await self._persona_queue.get()
-                try:
-                    await self._perform_persona_analysis(*key)
-                except Exception:
-                    LOGGER.exception("Persona analysis task failed")
-                finally:
-                    self._persona_inflight.discard(key)
-                    self._persona_queue.task_done()
-        except asyncio.CancelledError:
-            pass
-        finally:
-            if self._persona_queue is not None:
-                while not self._persona_queue.empty():
-                    try:
-                        self._persona_queue.get_nowait()
-                        self._persona_queue.task_done()
-                    except asyncio.QueueEmpty:
-                        break
-
-    async def _perform_persona_analysis(self, chat_id: int, user_id: int) -> None:
-        if self._persona_analyzer is None:
-            return
-        profile = await self._run_db(
-            self._db.get_persona_profile,
-            chat_id,
-            user_id,
-        )
-        if not profile:
-            return
-        pending = int(profile.get("pending_messages", 0))
-        if pending < self._settings.persona_analysis_min_messages:
-            return
-
-        user_row = await self._run_db(self._db.get_user_by_id, user_id)
-        if user_row is None:
-            return
-
-        messages = await self._run_db(
-            self._db.get_recent_messages_with_timestamp,
-            chat_id,
-            user_id,
-            self._settings.persona_analysis_max_messages,
-        )
-        if not messages:
-            return
-
-        samples: List[PersonaSample] = []
-        for row in messages:
-            text = (row["text"] or "").strip()
-            if not text:
-                continue
-            samples.append(
-                PersonaSample(text=text, timestamp=int(row["timestamp"]))
-            )
-
-        if len(samples) < self._settings.persona_analysis_min_messages:
-            return
-
-        display = display_name(
-            user_row["username"], user_row["first_name"], user_row["last_name"]
-        )
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: self._persona_analyzer.build_persona_card(
-                display, tuple(samples)
-            ),
-        )
-        if not result:
-            return
-
-        result.pop("writing_tips", None)
-
-        summary = str(result.get("overall_summary", "")).strip()
-        if not summary:
-            interests = result.get("interests") or []
-            if isinstance(interests, list) and interests:
-                joined = ", ".join(str(item) for item in interests if item)
-                if joined:
-                    summary = f"Интересы: {joined}."
-        if not summary:
-            traits = result.get("speech_traits") or []
-            if isinstance(traits, list) and traits:
-                joined = ", ".join(str(item) for item in traits if item)
-                if joined:
-                    summary = f"Речевые привычки: {joined}."
-        if not summary:
-            summary = "Карточка персоны обновлена."
-
-        details_json = json.dumps(result, ensure_ascii=False)
-        analyzed_at = int(time.time())
-        await self._run_db(
-            self._db.save_persona_profile,
-            chat_id,
-            user_id,
-            summary,
-            details_json,
-            analyzed_at,
-        )
-
-    async def _stop_analysis_worker(self) -> None:
-        if self._analysis_worker is not None:
-            self._analysis_worker.cancel()
-            try:
-                await self._analysis_worker
-            except asyncio.CancelledError:
-                pass
-            self._analysis_worker = None
-        if self._analysis_queue is not None:
-            while not self._analysis_queue.empty():
-                try:
-                    self._analysis_queue.get_nowait()
-                    self._analysis_queue.task_done()
-                except asyncio.QueueEmpty:
-                    break
-            self._analysis_queue = None
-        self._analysis_inflight.clear()
-
-    async def _stop_persona_worker(self) -> None:
-        if self._persona_worker is not None:
-            self._persona_worker.cancel()
-            try:
-                await self._persona_worker
-            except asyncio.CancelledError:
-                pass
-            self._persona_worker = None
-        if self._persona_queue is not None:
-            while not self._persona_queue.empty():
-                try:
-                    self._persona_queue.get_nowait()
-                    self._persona_queue.task_done()
-                except asyncio.QueueEmpty:
-                    break
-            self._persona_queue = None
-        self._persona_inflight.clear()
 
     async def _collect_style_samples(
         self, chat_id: int, user_id: int, *, topic_hint: Optional[str] = None
@@ -1473,8 +957,7 @@ class BotDouble:
             return
         reset = await self._run_db(self._db.reset_user_data, message.from_user.id)
         # invalidate alias caches globally, since aliases удалены во всех чатах
-        self._alias_cache.clear()
-        self._alias_display_cache.clear()
+        self._user_resolver.clear_all_caches()
         if reset:
             await message.reply_text(
                 "Ваши сообщения, связи и карточка персоны удалены. Я буду заново собирать ваш стиль с новых сообщений."

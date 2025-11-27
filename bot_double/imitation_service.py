@@ -15,6 +15,7 @@ from .imitation import ChainMessage, ImitationChain, ImitationToolkit
 from .style_analysis import build_style_summary
 from .style_engine import (
     ContextMessage,
+    DialogueParticipant,
     ParticipantProfile,
     RequesterProfile,
     StyleEngine,
@@ -445,23 +446,27 @@ class ImitationService:
         topic: str,
     ) -> str:
         loop = asyncio.get_running_loop()
-        style_samples_a = [StyleSample(text=sample) for sample in samples_a]
-        style_samples_b = [StyleSample(text=sample) for sample in samples_b]
+        participant_a = DialogueParticipant(
+            username=username_a,
+            name=persona_name_a,
+            samples=[StyleSample(text=sample) for sample in samples_a],
+            style_summary=style_summary_a,
+            persona_card=persona_card_a,
+            relationship_hint=relationship_hint_a,
+        )
+        participant_b = DialogueParticipant(
+            username=username_b,
+            name=persona_name_b,
+            samples=[StyleSample(text=sample) for sample in samples_b],
+            style_summary=style_summary_b,
+            persona_card=persona_card_b,
+            relationship_hint=relationship_hint_b,
+        )
         return await loop.run_in_executor(
             None,
             self._style.generate_dialogue,
-            username_a,
-            persona_name_a,
-            style_samples_a,
-            style_summary_a,
-            persona_card_a,
-            relationship_hint_a,
-            username_b,
-            persona_name_b,
-            style_samples_b,
-            style_summary_b,
-            persona_card_b,
-            relationship_hint_b,
+            participant_a,
+            participant_b,
             topic,
         )
 

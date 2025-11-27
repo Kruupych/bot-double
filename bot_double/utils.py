@@ -139,3 +139,48 @@ def guess_gender(first_name: Optional[str], username: Optional[str]) -> Optional
     if name.endswith(_FEMALE_ENDINGS):
         return "female"
     return None
+
+
+_CYR_TO_LAT = {
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "g",
+    "д": "d",
+    "е": "e",
+    "ё": "e",
+    "ж": "zh",
+    "з": "z",
+    "и": "i",
+    "й": "y",
+    "к": "k",
+    "л": "l",
+    "м": "m",
+    "н": "n",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "у": "u",
+    "ф": "f",
+    "х": "h",
+    "ц": "ts",
+    "ч": "ch",
+    "ш": "sh",
+    "щ": "shch",
+    "ъ": "",
+    "ы": "y",
+    "ь": "",
+    "э": "e",
+    "ю": "yu",
+    "я": "ya",
+}
+
+
+def transliterate(text: str) -> str:
+    """Transliterate Cyrillic characters to Latin."""
+    result_chars: list[str] = []
+    for char in text:
+        result_chars.append(_CYR_TO_LAT.get(char, char))
+    return "".join(result_chars)
