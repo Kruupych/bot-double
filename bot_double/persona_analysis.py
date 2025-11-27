@@ -6,12 +6,7 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 
 from openai import OpenAI
 
-
-PERSONA_SYSTEM_PROMPT = (
-    "Ты — эксперт по психологии общения и стилю речи."
-    " На основе выборки сообщений пользователя опиши его портрет."
-    " Работай аккуратно и избегай неподтверждённых предположений."
-)
+from .prompts import PERSONA_INSTRUCTIONS, PERSONA_SYSTEM
 
 
 @dataclass(slots=True)
@@ -53,16 +48,7 @@ class PersonaAnalyzer:
             for idx, (_, text) in enumerate(collected)
         )
 
-        instructions = (
-            "На основе реплик пользователя составь его краткую персональную карточку."
-            " Отрази интересы, чувство юмора, эмоциональность, общий тон и характерные речевые привычки."
-            " Делай выводы только из текстов, избегай стереотипов."
-            " Верни структуру в формате JSON с полями:"
-            " {\"overall_summary\": string, \"interests\": array,"
-            " \"humor_style\": string, \"emotionality\": string, \"tonality\": string,"
-            " \"speech_traits\": array}."
-            " Массивы заполняй строками. Если данных не хватает, используй значение 'unknown'."
-        )
+        instructions = PERSONA_INSTRUCTIONS
 
         prompt = (
             f"{instructions}\n\n"
@@ -78,7 +64,7 @@ class PersonaAnalyzer:
         response = self._client.responses.create(
             model=self._model,
             input=[
-                {"role": "system", "content": PERSONA_SYSTEM_PROMPT},
+                {"role": "system", "content": PERSONA_SYSTEM},
                 {"role": "user", "content": prompt},
             ],
             **kwargs,

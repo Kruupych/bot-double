@@ -6,13 +6,7 @@ from typing import Iterable, List, Optional, Sequence
 
 from openai import OpenAI
 
-
-ANALYSIS_SYSTEM_PROMPT = (
-    "Ты — эксперт по социальной психологии и анализу коммуникаций."
-    " Твоя задача — внимательно читать диалог и делать взвешенные выводы"
-    " о тоне, степени тепла и динамике отношений между собеседниками."
-    " Формируй ответы только на основании приведённого текста, без домыслов."
-)
+from .prompts import RELATIONSHIP_INSTRUCTIONS_TEMPLATE, RELATIONSHIP_SYSTEM
 
 
 @dataclass(slots=True)
@@ -61,16 +55,9 @@ class SocialAnalyzer:
 
         dialogue_block = "\n\n".join(blocks)
 
-        instructions = (
-            "Проанализируй манеру общения одной стороны по отношению к другой."
-            f" Говорящий: {speaker_name}. Адресат: {target_name}."
-            " Используй приведённые эпизоды как материал."
-            " Верни результат строго в формате JSON со следующими полями:"
-            " {\"summary\": string, \"tone\": string, \"formality\": string,"
-            " \"teasing_level\": string, \"respect_level\": string,"
-            " \"emotional_notes\": string, \"example_quotes\": array}."
-            " \"example_quotes\" — список до трёх характерных цитат говорящего."
-            " Если какие-то поля оценить невозможно, заполни их строкой 'unknown'."
+        instructions = RELATIONSHIP_INSTRUCTIONS_TEMPLATE.format(
+            speaker=speaker_name,
+            target=target_name,
         )
 
         prompt = (
@@ -86,7 +73,7 @@ class SocialAnalyzer:
         response = self._client.responses.create(
             model=self._model,
             input=[
-                {"role": "system", "content": ANALYSIS_SYSTEM_PROMPT},
+                {"role": "system", "content": RELATIONSHIP_SYSTEM},
                 {"role": "user", "content": prompt},
             ],
             **kwargs,
