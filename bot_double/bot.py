@@ -1010,6 +1010,7 @@ def run_bot(settings: Settings) -> None:
     application.add_handler(CommandHandler("auto_imitate_off", bot.commands.auto_imitate_off))
     application.add_handler(CommandHandler("dialogue", bot.imitation.dialogue_command))
     application.add_handler(CommandHandler("roast", bot.imitation.roast_command))
+    application.add_handler(CommandHandler("horoscope", bot.imitation.horoscope_command))
     application.add_handler(CommandHandler("compatibility", bot.imitation.compatibility_command))
     application.add_handler(CommandHandler("story", bot.imitation.story_command))
     application.add_handler(CommandHandler("long_story", bot.imitation.long_story_command))

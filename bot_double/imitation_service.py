@@ -322,6 +322,95 @@ class ImitationService:
             ),
         )
 
+    async def horoscope_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Generate a personalized horoscope based on user's communication patterns."""
+        message = update.effective_message
+        chat = update.effective_chat
+        if not message or not chat:
+            return
+
+        if not context.args:
+            await message.reply_text("Использование: /horoscope @username")
+            return
+
+        username_arg = context.args[0]
+        if not username_arg.startswith("@"):
+            await message.reply_text("Аргументом должен быть @username")
+            return
+
+        username = username_arg.lstrip("@")
+
+        user_row = await self._run_db(self._db.get_user_by_username, username)
+        if user_row is None:
+            await message.reply_text(f"Я ещё не знаю пользователя @{username}.")
+            return
+
+        user_id = int(user_row["id"])
+        persona_name = display_name(
+            user_row["username"], user_row["first_name"], user_row["last_name"]
+        )
+
+        message_count = await self._run_db(
+            self._db.get_message_count, chat.id, user_id
+        )
+        if message_count < self._settings.min_messages_for_profile:
+            await message.reply_text(
+                f"Мне нужно больше сообщений от {persona_name}, "
+                f"чтобы составить гороскоп (минимум {self._settings.min_messages_for_profile})."
+            )
+            return
+
+        samples = await self._collect_style_samples(chat.id, user_id, topic_hint="")
+        if not samples:
+            await message.reply_text(
+                f"Сообщений {persona_name} пока недостаточно для генерации гороскопа."
+            )
+            return
+
+        persona_card, style_summary = await self._choose_persona_artifacts(
+            chat.id, user_id, samples
+        )
+
+        try:
+            horoscope_text = await self._generate_horoscope(
+                user_row["username"] or username,
+                persona_name,
+                samples,
+                style_summary,
+                persona_card,
+            )
+        except Exception:
+            await message.reply_text(
+                "Не удалось сгенерировать гороскоп. Попробуйте позже."
+            )
+            return
+
+        header = f"🔮 Гороскоп для {persona_name}:\n\n"
+        await message.reply_text(header + horoscope_text)
+
+    async def _generate_horoscope(
+        self,
+        username: str,
+        persona_name: str,
+        samples: List[str],
+        style_summary: Optional[str],
+        persona_card: Optional[str],
+    ) -> str:
+        """Call StyleEngine to generate a horoscope."""
+        from .style_engine import StyleSample
+
+        style_samples = [StyleSample(text=s) for s in samples]
+        return await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: self._style.generate_horoscope(
+                username,
+                persona_name,
+                style_samples,
+                style_summary,
+                persona_card,
+            ),
+        )
+
     async def compatibility_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Generate a fun compatibility test between two users based on communication styles."""
         message = update.effective_message

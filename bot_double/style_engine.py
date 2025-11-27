@@ -11,6 +11,8 @@ from .prompts import (
     DIALOGUE_RULES_TEMPLATE,
     GENDER_FEMALE_INSTRUCTION,
     GENDER_MALE_INSTRUCTION,
+    HOROSCOPE_INSTRUCTIONS,
+    HOROSCOPE_SYSTEM,
     IMITATION_RULES,
     IMITATION_SYSTEM,
     REQUESTER_OTHER_INSTRUCTION,
@@ -416,6 +418,57 @@ class StyleEngine:
                 {
                     "role": "system",
                     "content": STORY_SYSTEM,
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            **kwargs,
+        )
+        return response.output_text.strip()
+
+    def generate_horoscope(
+        self,
+        username: str,
+        display_name: str,
+        samples: Iterable[StyleSample],
+        style_summary: Optional[str] = None,
+        persona_card: Optional[str] = None,
+    ) -> str:
+        """Generate a personalized horoscope based on user's communication patterns."""
+        sample_block = "\n".join(f"- {sample.text}" for sample in samples)
+        if not sample_block:
+            raise ValueError("No samples supplied for horoscope generation")
+
+        summary_section = ""
+        if style_summary:
+            summary_section = f"\nХарактеристика стиля:\n{style_summary}\n"
+
+        persona_section = ""
+        if persona_card:
+            persona_section = f"\nКарточка персоны:\n{persona_card}\n"
+
+        prompt = (
+            f"Составь персональный гороскоп для {display_name} (@{username}).\n\n"
+            f"Примеры его сообщений:\n{sample_block}\n"
+            f"{summary_section}"
+            f"{persona_section}\n"
+            f"{HOROSCOPE_INSTRUCTIONS}"
+        )
+
+        kwargs: dict[str, object] = {}
+        if self._reasoning_effort:
+            kwargs["reasoning"] = {"effort": self._reasoning_effort}
+        if self._text_verbosity:
+            kwargs["text"] = {"verbosity": self._text_verbosity}
+
+        response = self._client.responses.create(
+            model=self._model,
+            input=[
+                {
+                    "role": "system",
+                    "content": HOROSCOPE_SYSTEM,
                 },
                 {
                     "role": "user",
