@@ -6,6 +6,8 @@ from typing import Iterable, List, Optional
 from openai import OpenAI
 
 from .prompts import (
+    COMPATIBILITY_INSTRUCTIONS,
+    COMPATIBILITY_SYSTEM,
     DIALOGUE_RULES_TEMPLATE,
     GENDER_FEMALE_INSTRUCTION,
     GENDER_MALE_INSTRUCTION,
@@ -276,6 +278,60 @@ class StyleEngine:
                 {
                     "role": "system",
                     "content": ROAST_SYSTEM,
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            **kwargs,
+        )
+        return response.output_text.strip()
+
+    def generate_compatibility(
+        self,
+        name_a: str,
+        username_a: str,
+        samples_a: Iterable[StyleSample],
+        style_summary_a: Optional[str],
+        name_b: str,
+        username_b: str,
+        samples_b: Iterable[StyleSample],
+        style_summary_b: Optional[str],
+    ) -> str:
+        """Generate a fun compatibility analysis between two users."""
+        sample_block_a = "\n".join(f"- {s.text}" for s in samples_a)
+        sample_block_b = "\n".join(f"- {s.text}" for s in samples_b)
+
+        if not sample_block_a or not sample_block_b:
+            raise ValueError("Both users must have samples for compatibility check")
+
+        summary_a = f"\nСтиль: {style_summary_a}" if style_summary_a else ""
+        summary_b = f"\nСтиль: {style_summary_b}" if style_summary_b else ""
+
+        instructions = COMPATIBILITY_INSTRUCTIONS.replace("{name_a}", name_a).replace("{name_b}", name_b)
+
+        prompt = (
+            f"Составь шуточный тест совместимости для {name_a} и {name_b}.\n\n"
+            f"👤 {name_a} (@{username_a}):\n"
+            f"Примеры сообщений:\n{sample_block_a}{summary_a}\n\n"
+            f"👤 {name_b} (@{username_b}):\n"
+            f"Примеры сообщений:\n{sample_block_b}{summary_b}\n\n"
+            f"{instructions}"
+        )
+
+        kwargs: dict[str, object] = {}
+        if self._reasoning_effort:
+            kwargs["reasoning"] = {"effort": self._reasoning_effort}
+        if self._text_verbosity:
+            kwargs["text"] = {"verbosity": self._text_verbosity}
+
+        response = self._client.responses.create(
+            model=self._model,
+            input=[
+                {
+                    "role": "system",
+                    "content": COMPATIBILITY_SYSTEM,
                 },
                 {
                     "role": "user",
