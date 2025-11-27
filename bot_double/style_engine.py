@@ -13,6 +13,8 @@ from .prompts import (
     IMITATION_SYSTEM,
     REQUESTER_OTHER_INSTRUCTION,
     REQUESTER_SELF_INSTRUCTION,
+    ROAST_INSTRUCTIONS,
+    ROAST_SYSTEM,
 )
 
 
@@ -230,5 +232,56 @@ class StyleEngine:
                     "content": prompt,
                 },
             ],
+        )
+        return response.output_text.strip()
+
+    def generate_roast(
+        self,
+        username: str,
+        display_name: str,
+        samples: Iterable[StyleSample],
+        style_summary: Optional[str] = None,
+        persona_card: Optional[str] = None,
+    ) -> str:
+        """Generate a playful roast based on user's communication style."""
+        sample_block = "\n".join(f"- {sample.text}" for sample in samples)
+        if not sample_block:
+            raise ValueError("No samples supplied for roast generation")
+
+        summary_section = ""
+        if style_summary:
+            summary_section = f"\nХарактеристика стиля:\n{style_summary}\n"
+
+        persona_section = ""
+        if persona_card:
+            persona_section = f"\nКарточка персоны:\n{persona_card}\n"
+
+        prompt = (
+            f"Сделай добродушную «поджарку» пользователя {display_name} (@{username}).\n\n"
+            f"Примеры его сообщений:\n{sample_block}\n"
+            f"{summary_section}"
+            f"{persona_section}\n"
+            f"{ROAST_INSTRUCTIONS}"
+        )
+
+        kwargs: dict[str, object] = {}
+        if self._reasoning_effort:
+            kwargs["reasoning"] = {"effort": self._reasoning_effort}
+        if self._text_verbosity:
+            kwargs["text"] = {"verbosity": self._text_verbosity}
+
+        response = self._client.responses.create(
+            model=self._model,
+            input=[
+                {
+                    "role": "system",
+                    "content": ROAST_SYSTEM,
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            **kwargs,
         )
         return response.output_text.strip()
