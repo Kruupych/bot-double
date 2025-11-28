@@ -31,6 +31,8 @@ from .prompts import (
     STORY_SYSTEM,
     SUMMARY_INSTRUCTIONS,
     SUMMARY_SYSTEM,
+    TINDER_INSTRUCTIONS,
+    TINDER_SYSTEM,
 )
 
 
@@ -686,6 +688,62 @@ class StyleEngine:
                 {
                     "role": "system",
                     "content": SUMMARY_SYSTEM,
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            **kwargs,
+        )
+        return response.output_text.strip()
+
+    def generate_tinder(
+        self,
+        username: str,
+        display_name: str,
+        samples: Iterable[StyleSample],
+        style_summary: Optional[str] = None,
+        persona_card: Optional[str] = None,
+        aliases: Optional[List[str]] = None,
+    ) -> str:
+        """Generate a Tinder profile based on user's communication style."""
+        sample_block = "\n".join(f"- {sample.text}" for sample in samples)
+        if not sample_block:
+            raise ValueError("No samples supplied for Tinder profile generation")
+
+        aliases_hint = ""
+        if aliases:
+            aliases_hint = f" (также известен как: {', '.join(aliases)})"
+
+        summary_section = ""
+        if style_summary:
+            summary_section = f"\nХарактеристика стиля:\n{style_summary}\n"
+
+        persona_section = ""
+        if persona_card:
+            persona_section = f"\nКарточка персоны:\n{persona_card}\n"
+
+        prompt = (
+            f"Создай Tinder-профиль для {display_name}{aliases_hint} (@{username}).\n\n"
+            f"Примеры его сообщений:\n{sample_block}\n"
+            f"{summary_section}"
+            f"{persona_section}\n"
+            f"{TINDER_INSTRUCTIONS}"
+        )
+
+        kwargs: dict[str, object] = {}
+        if self._reasoning_effort:
+            kwargs["reasoning"] = {"effort": self._reasoning_effort}
+        if self._text_verbosity:
+            kwargs["text"] = {"verbosity": self._text_verbosity}
+
+        response = self._client.responses.create(
+            model=self._model,
+            input=[
+                {
+                    "role": "system",
+                    "content": TINDER_SYSTEM,
                 },
                 {
                     "role": "user",

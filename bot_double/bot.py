@@ -1023,6 +1023,7 @@ def run_bot(settings: Settings) -> None:
     application.add_handler(CommandHandler("dialogue", bot.imitation.dialogue_command))
     application.add_handler(CommandHandler("roast", bot.imitation.roast_command))
     application.add_handler(CommandHandler("horoscope", bot.imitation.horoscope_command))
+    application.add_handler(CommandHandler("tinder", bot.imitation.tinder_command))
     application.add_handler(CommandHandler("compatibility", bot.imitation.compatibility_command))
     application.add_handler(CommandHandler("battle", bot.imitation.battle_command))
     application.add_handler(CommandHandler("news", bot.imitation.news_command))

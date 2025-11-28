@@ -429,6 +429,101 @@ class ImitationService:
             ),
         )
 
+    async def tinder_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Generate a Tinder profile based on user's communication style."""
+        message = update.effective_message
+        chat = update.effective_chat
+        if not message or not chat:
+            return
+
+        if not context.args:
+            await message.reply_text("Использование: /tinder @username")
+            return
+
+        username_arg = context.args[0]
+        if not username_arg.startswith("@"):
+            await message.reply_text("Аргументом должен быть @username")
+            return
+
+        username = username_arg.lstrip("@")
+
+        user_row = await self._run_db(self._db.get_user_by_username, username)
+        if user_row is None:
+            await message.reply_text(f"Я ещё не знаю пользователя @{username}.")
+            return
+
+        user_id = int(user_row["id"])
+        persona_name = display_name(
+            user_row["username"], user_row["first_name"], user_row["last_name"]
+        )
+
+        message_count = await self._run_db(
+            self._db.get_message_count, chat.id, user_id
+        )
+        if message_count < self._settings.min_messages_for_profile:
+            await message.reply_text(
+                f"Мне нужно больше сообщений от {persona_name}, "
+                f"чтобы создать Tinder-профиль (минимум {self._settings.min_messages_for_profile})."
+            )
+            return
+
+        samples = await self._collect_style_samples(chat.id, user_id, topic_hint="")
+        if not samples:
+            await message.reply_text(
+                f"Сообщений {persona_name} пока недостаточно для генерации профиля."
+            )
+            return
+
+        persona_card, style_summary = await self._choose_persona_artifacts(
+            chat.id, user_id, samples
+        )
+
+        # Fetch aliases for persona
+        aliases = await self._run_db(self._db.get_user_aliases, chat.id, user_id, 5) or None
+
+        try:
+            tinder_text = await self._generate_tinder(
+                user_row["username"] or username,
+                persona_name,
+                samples,
+                style_summary,
+                persona_card,
+                aliases,
+            )
+        except Exception:
+            await message.reply_text(
+                "Не удалось сгенерировать Tinder-профиль. Попробуйте позже."
+            )
+            return
+
+        header = f"💘 Tinder-профиль для {persona_name}:\n\n"
+        await message.reply_text(header + tinder_text)
+
+    async def _generate_tinder(
+        self,
+        username: str,
+        persona_name: str,
+        samples: List[str],
+        style_summary: Optional[str],
+        persona_card: Optional[str],
+        aliases: Optional[List[str]] = None,
+    ) -> str:
+        """Call StyleEngine to generate a Tinder profile."""
+        from .style_engine import StyleSample
+
+        style_samples = [StyleSample(text=s) for s in samples]
+        return await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: self._style.generate_tinder(
+                username,
+                persona_name,
+                style_samples,
+                style_summary,
+                persona_card,
+                aliases,
+            ),
+        )
+
     async def compatibility_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Generate a fun compatibility test between two users based on communication styles."""
         message = update.effective_message
