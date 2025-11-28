@@ -570,6 +570,147 @@ class ImitationService:
             ),
         )
 
+    async def battle_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Generate a rap battle between two users based on their communication styles."""
+        message = update.effective_message
+        chat = update.effective_chat
+        if not message or not chat:
+            return
+
+        if len(context.args) < 2:
+            await message.reply_text("Использование: /battle @user1 @user2")
+            return
+
+        username_a_arg, username_b_arg = context.args[0], context.args[1]
+        if not username_a_arg.startswith("@") or not username_b_arg.startswith("@"):
+            await message.reply_text("Оба аргумента должны быть @username")
+            return
+
+        username_a = username_a_arg.lstrip("@")
+        username_b = username_b_arg.lstrip("@")
+
+        if username_a.lower() == username_b.lower():
+            await message.reply_text("Нужны два разных участника для баттла 🎤")
+            return
+
+        row_a = await self._run_db(self._db.get_user_by_username, username_a)
+        row_b = await self._run_db(self._db.get_user_by_username, username_b)
+
+        if row_a is None:
+            await message.reply_text(f"Я ещё не знаю пользователя @{username_a}.")
+            return
+        if row_b is None:
+            await message.reply_text(f"Я ещё не знаю пользователя @{username_b}.")
+            return
+
+        internal_a = int(row_a["id"])
+        internal_b = int(row_b["id"])
+
+        persona_name_a = display_name(
+            row_a["username"], row_a["first_name"], row_a["last_name"]
+        )
+        persona_name_b = display_name(
+            row_b["username"], row_b["first_name"], row_b["last_name"]
+        )
+
+        # Check minimum messages for both users
+        count_a = await self._run_db(self._db.get_message_count, chat.id, internal_a)
+        count_b = await self._run_db(self._db.get_message_count, chat.id, internal_b)
+        min_required = self._settings.min_messages_for_profile
+
+        if count_a < min_required:
+            await message.reply_text(
+                f"Мне нужно больше сообщений от {persona_name_a} "
+                f"(минимум {min_required})."
+            )
+            return
+        if count_b < min_required:
+            await message.reply_text(
+                f"Мне нужно больше сообщений от {persona_name_b} "
+                f"(минимум {min_required})."
+            )
+            return
+
+        # Collect samples for both users
+        samples_a = await self._collect_style_samples(chat.id, internal_a, topic_hint="")
+        samples_b = await self._collect_style_samples(chat.id, internal_b, topic_hint="")
+
+        if not samples_a:
+            await message.reply_text(f"Недостаточно сообщений от {persona_name_a}.")
+            return
+        if not samples_b:
+            await message.reply_text(f"Недостаточно сообщений от {persona_name_b}.")
+            return
+
+        # Get style summaries
+        _, style_summary_a = await self._choose_persona_artifacts(
+            chat.id, internal_a, samples_a
+        )
+        _, style_summary_b = await self._choose_persona_artifacts(
+            chat.id, internal_b, samples_b
+        )
+
+        # Fetch aliases for both users
+        aliases_a = await self._run_db(self._db.get_user_aliases, chat.id, internal_a, 5) or None
+        aliases_b = await self._run_db(self._db.get_user_aliases, chat.id, internal_b, 5) or None
+
+        try:
+            result = await self._generate_battle(
+                persona_name_a,
+                row_a["username"] or username_a,
+                samples_a,
+                style_summary_a,
+                aliases_a,
+                persona_name_b,
+                row_b["username"] or username_b,
+                samples_b,
+                style_summary_b,
+                aliases_b,
+            )
+        except Exception:
+            await message.reply_text(
+                "Не удалось организовать баттл. Попробуйте позже."
+            )
+            return
+
+        header = f"🎤 РЭП-БАТТЛ: {persona_name_a} vs {persona_name_b} 🎤\n\n"
+        await message.reply_text(header + result)
+
+    async def _generate_battle(
+        self,
+        name_a: str,
+        username_a: str,
+        samples_a: List[str],
+        style_summary_a: Optional[str],
+        aliases_a: Optional[List[str]],
+        name_b: str,
+        username_b: str,
+        samples_b: List[str],
+        style_summary_b: Optional[str],
+        aliases_b: Optional[List[str]],
+    ) -> str:
+        """Call StyleEngine to generate a rap battle."""
+        from .style_engine import StyleSample
+
+        style_samples_a = [StyleSample(text=s) for s in samples_a]
+        style_samples_b = [StyleSample(text=s) for s in samples_b]
+
+        return await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: self._style.generate_battle(
+                name_a,
+                username_a,
+                style_samples_a,
+                style_summary_a,
+                aliases_a,
+                name_b,
+                username_b,
+                style_samples_b,
+                style_summary_b,
+                aliases_b,
+            ),
+        )
+
     async def story_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Generate a short story with chat participants as characters."""
         await self._handle_story_command(update, context, long_version=False)

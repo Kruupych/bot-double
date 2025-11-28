@@ -9,6 +9,8 @@ from openai import OpenAI
 _log = logging.getLogger(__name__)
 
 from .prompts import (
+    BATTLE_INSTRUCTIONS,
+    BATTLE_SYSTEM,
     COMPATIBILITY_INSTRUCTIONS,
     COMPATIBILITY_SYSTEM,
     DIALOGUE_RULES_TEMPLATE,
@@ -505,6 +507,65 @@ class StyleEngine:
                 {
                     "role": "system",
                     "content": HOROSCOPE_SYSTEM,
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            **kwargs,
+        )
+        return response.output_text.strip()
+
+    def generate_battle(
+        self,
+        name_a: str,
+        username_a: str,
+        samples_a: Iterable[StyleSample],
+        style_summary_a: Optional[str],
+        aliases_a: Optional[List[str]],
+        name_b: str,
+        username_b: str,
+        samples_b: Iterable[StyleSample],
+        style_summary_b: Optional[str],
+        aliases_b: Optional[List[str]],
+    ) -> str:
+        """Generate a rap battle between two users based on their communication styles."""
+        sample_block_a = "\n".join(f"- {s.text}" for s in samples_a)
+        sample_block_b = "\n".join(f"- {s.text}" for s in samples_b)
+
+        if not sample_block_a or not sample_block_b:
+            raise ValueError("Both users must have samples for battle")
+
+        aliases_hint_a = f" (также известен как: {', '.join(aliases_a)})" if aliases_a else ""
+        aliases_hint_b = f" (также известен как: {', '.join(aliases_b)})" if aliases_b else ""
+
+        summary_a = f"\nСтиль: {style_summary_a}" if style_summary_a else ""
+        summary_b = f"\nСтиль: {style_summary_b}" if style_summary_b else ""
+
+        instructions = BATTLE_INSTRUCTIONS.replace("{name_a}", name_a).replace("{name_b}", name_b)
+
+        prompt = (
+            f"Организуй рэп-баттл между {name_a} и {name_b}.\n\n"
+            f"🎤 {name_a}{aliases_hint_a} (@{username_a}):\n"
+            f"Примеры сообщений:\n{sample_block_a}{summary_a}\n\n"
+            f"🎤 {name_b}{aliases_hint_b} (@{username_b}):\n"
+            f"Примеры сообщений:\n{sample_block_b}{summary_b}\n\n"
+            f"{instructions}"
+        )
+
+        kwargs: dict[str, object] = {}
+        if self._reasoning_effort:
+            kwargs["reasoning"] = {"effort": self._reasoning_effort}
+        if self._text_verbosity:
+            kwargs["text"] = {"verbosity": self._text_verbosity}
+
+        response = self._client.responses.create(
+            model=self._model,
+            input=[
+                {
+                    "role": "system",
+                    "content": BATTLE_SYSTEM,
                 },
                 {
                     "role": "user",
