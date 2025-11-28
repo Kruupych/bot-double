@@ -996,9 +996,12 @@ class ImitationService:
             await message.reply_text("Заговор слишком глубок. Данные засекречены.")
             return
 
-        await message.reply_text(
+        await send_long_text(
+            message,
             _markdown_to_html(conspiracy_text),
             parse_mode=ParseMode.HTML,
+            document_filename="conspiracy.txt",
+            document_caption="🔺 РАССЕКРЕЧЕННЫЕ МАТЕРИАЛЫ 🔺",
         )
 
     async def _generate_conspiracy(

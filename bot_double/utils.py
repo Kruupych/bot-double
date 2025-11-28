@@ -6,6 +6,7 @@ import unicodedata
 from typing import List, Optional
 
 from telegram import Message
+from telegram.constants import ParseMode
 
 
 def display_name(username: Optional[str], first_name: Optional[str], last_name: Optional[str]) -> str:
@@ -258,6 +259,7 @@ async def send_long_text(
     document_threshold: int = 6000,
     document_filename: str = "text.txt",
     document_caption: Optional[str] = None,
+    parse_mode: Optional[str] = None,
 ) -> None:
     """
     Send potentially long text, handling Telegram's message limits.
@@ -273,6 +275,7 @@ async def send_long_text(
         document_threshold: Length above which to send as document (default 6000)
         document_filename: Filename for document mode
         document_caption: Caption for document mode
+        parse_mode: Telegram parse mode (e.g., ParseMode.HTML)
     """
     text = text.strip()
     
@@ -281,7 +284,7 @@ async def send_long_text(
     
     # Simple case: fits in one message
     if len(text) <= max_message_len:
-        await message.reply_text(text)
+        await message.reply_text(text, parse_mode=parse_mode)
         return
     
     # Very long: send as document
@@ -300,8 +303,8 @@ async def send_long_text(
     
     for i, chunk in enumerate(chunks):
         if i == 0:
-            await message.reply_text(chunk)
+            await message.reply_text(chunk, parse_mode=parse_mode)
         else:
             # Send follow-up messages to the same chat
             if message.chat:
-                await message.chat.send_message(chunk)
+                await message.chat.send_message(chunk, parse_mode=parse_mode)
