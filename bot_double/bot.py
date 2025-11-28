@@ -930,6 +930,11 @@ class BotDouble:
         formatted = [text.strip() for text in samples if text.strip()]
         name = display_name(user.username, user.first_name, user.last_name)
         is_same_person = requester_internal_id == target_internal_id
+        if is_same_person:
+            _log.info(
+                "Self-imitation detected: requester_id=%d, target_id=%d, user=%s",
+                requester_internal_id, target_internal_id, name,
+            )
         if not formatted and not is_same_person:
             return None
         return RequesterProfile(

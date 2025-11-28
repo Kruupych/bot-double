@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
 from openai import OpenAI
+
+_log = logging.getLogger(__name__)
 
 from .prompts import (
     COMPATIBILITY_INSTRUCTIONS,
@@ -141,6 +144,7 @@ class StyleEngine:
                 sample_hint = f" Он обычно пишет так: {joined}."
             requester_section = f"Вопрос задаёт {requester.name}.{sample_hint}\n"
             if requester.is_same_person:
+                _log.info("Adding SELF instruction for user %s", requester.name)
                 requester_section += REQUESTER_SELF_INSTRUCTION
             else:
                 requester_section += REQUESTER_OTHER_INSTRUCTION
