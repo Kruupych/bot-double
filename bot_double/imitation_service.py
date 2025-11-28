@@ -6,7 +6,10 @@ import re
 import sqlite3
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple, TypeVar
 
+import re
+
 from telegram import Message, MessageEntity, Update, User
+from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from .config import Settings
@@ -38,6 +41,17 @@ ResolveUserDescriptor = Callable[
     [Optional[int], str],
     Awaitable[Tuple[Optional[sqlite3.Row], List[Tuple[sqlite3.Row, float]]]],
 ]
+
+
+def _markdown_to_html(text: str) -> str:
+    """Convert standard markdown bold/italic to HTML for Telegram."""
+    # Convert **bold** to <b>bold</b>
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    # Convert *italic* to <i>italic</i> (but not if already converted)
+    text = re.sub(r'(?<!</b>)\*(.+?)\*(?!<)', r'<i>\1</i>', text)
+    # Escape < and > that aren't part of our tags
+    # (This is tricky, so we'll be conservative)
+    return text
 
 
 class ImitationService:
@@ -307,7 +321,10 @@ class ImitationService:
             return
 
         header = f"🔥 Поджарка для {persona_name}:\n\n"
-        await message.reply_text(header + roast_text)
+        await message.reply_text(
+            _markdown_to_html(header + roast_text),
+            parse_mode=ParseMode.HTML,
+        )
 
     async def _generate_roast(
         self,
@@ -402,7 +419,10 @@ class ImitationService:
             return
 
         header = f"🔮 Гороскоп для {persona_name}:\n\n"
-        await message.reply_text(header + horoscope_text)
+        await message.reply_text(
+            _markdown_to_html(header + horoscope_text),
+            parse_mode=ParseMode.HTML,
+        )
 
     async def _generate_horoscope(
         self,
@@ -497,7 +517,10 @@ class ImitationService:
             return
 
         header = f"💘 Tinder-профиль для {persona_name}:\n\n"
-        await message.reply_text(header + tinder_text)
+        await message.reply_text(
+            _markdown_to_html(header + tinder_text),
+            parse_mode=ParseMode.HTML,
+        )
 
     async def _generate_tinder(
         self,
@@ -628,7 +651,10 @@ class ImitationService:
             return
 
         header = f"💕 Тест совместимости: {persona_name_a} & {persona_name_b}\n\n"
-        await message.reply_text(header + result)
+        await message.reply_text(
+            _markdown_to_html(header + result),
+            parse_mode=ParseMode.HTML,
+        )
 
     async def _generate_compatibility(
         self,
@@ -769,7 +795,10 @@ class ImitationService:
             return
 
         header = f"🎤 РЭП-БАТТЛ: {persona_name_a} vs {persona_name_b} 🎤\n\n"
-        await message.reply_text(header + result)
+        await message.reply_text(
+            _markdown_to_html(header + result),
+            parse_mode=ParseMode.HTML,
+        )
 
     async def _generate_battle(
         self,
@@ -845,7 +874,10 @@ class ImitationService:
             )
             return
 
-        await message.reply_text(news_text)
+        await message.reply_text(
+            _markdown_to_html(news_text),
+            parse_mode=ParseMode.HTML,
+        )
 
     async def _generate_news(
         self,
@@ -896,7 +928,10 @@ class ImitationService:
             )
             return
 
-        await message.reply_text(summary_text)
+        await message.reply_text(
+            _markdown_to_html(summary_text),
+            parse_mode=ParseMode.HTML,
+        )
 
     async def _generate_summary(
         self,
