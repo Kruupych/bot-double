@@ -770,6 +770,23 @@ class Database:
         rows.reverse()
         return rows
 
+    def count_messages_last_24h(self, chat_id: int) -> int:
+        """Count messages in a chat from the last 24 hours."""
+        import time
+
+        cutoff = int(time.time()) - 86400  # 24 hours ago
+        cursor = self._conn.execute(
+            "SELECT COUNT(*) as cnt FROM messages WHERE chat_id = ? AND timestamp > ?",
+            (chat_id, cutoff),
+        )
+        row = cursor.fetchone()
+        return int(row["cnt"]) if row else 0
+
+    def get_active_chat_ids(self) -> List[int]:
+        """Get all unique chat IDs that have messages."""
+        cursor = self._conn.execute("SELECT DISTINCT chat_id FROM messages")
+        return [row["chat_id"] for row in cursor.fetchall()]
+
     def get_top_participants(
         self, chat_id: int, exclude_user_id: Optional[int], limit: int
     ) -> List[sqlite3.Row]:

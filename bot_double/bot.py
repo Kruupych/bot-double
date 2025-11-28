@@ -8,10 +8,13 @@ import random
 import re
 import sqlite3
 import time
+from datetime import time as dt_time
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TypeVar
+from zoneinfo import ZoneInfo
 
 from telegram import Message, Update, User
+from telegram.constants import ParseMode
 from telegram.ext import (
     AIORateLimiter,
     Application,
@@ -192,6 +195,32 @@ class BotDouble:
             self._persona_worker.start()
         # Start a watchdog to flush stale bursts in case timers are cancelled
         self._burst_manager.start()
+        # Schedule daily news if enabled
+        if self._settings.scheduled_news_enabled and application.job_queue is not None:
+            try:
+                tz = ZoneInfo(self._settings.scheduled_news_timezone)
+            except Exception:
+                LOGGER.warning(
+                    "Invalid timezone %s, using UTC",
+                    self._settings.scheduled_news_timezone
+                )
+                tz = ZoneInfo("UTC")
+            job_time = dt_time(
+                hour=self._settings.scheduled_news_hour,
+                minute=self._settings.scheduled_news_minute,
+                tzinfo=tz,
+            )
+            application.job_queue.run_daily(
+                self._scheduled_news_job,
+                time=job_time,
+                name="scheduled_news",
+            )
+            LOGGER.info(
+                "Scheduled daily news at %02d:%02d %s",
+                self._settings.scheduled_news_hour,
+                self._settings.scheduled_news_minute,
+                self._settings.scheduled_news_timezone,
+            )
 
     async def _post_shutdown(self, application: Application) -> None:
         LOGGER.info("Bot shutting down")
@@ -201,6 +230,59 @@ class BotDouble:
         if self._persona_worker is not None:
             await self._persona_worker.stop()
         self._db.close()
+
+    async def _scheduled_news_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Generate and send news to active chats if message threshold is met."""
+        min_messages = self._settings.scheduled_news_min_messages
+        chat_ids = await self._run_db(self._db.get_active_chat_ids)
+        
+        for chat_id in chat_ids:
+            try:
+                message_count = await self._run_db(
+                    self._db.count_messages_last_24h, chat_id
+                )
+                if message_count < min_messages:
+                    LOGGER.debug(
+                        "Skipping scheduled news for chat %d: %d messages (need %d)",
+                        chat_id, message_count, min_messages
+                    )
+                    continue
+                
+                LOGGER.info(
+                    "Generating scheduled news for chat %d (%d messages)",
+                    chat_id, message_count
+                )
+                
+                # Get recent messages for news generation
+                rows = await self._run_db(
+                    self._db.get_recent_chat_messages, chat_id, 100
+                )
+                if len(rows) < 20:
+                    continue
+                
+                messages = [
+                    {"name": display_name(r["username"], r["first_name"], r["last_name"]), "text": r["text"]}
+                    for r in rows
+                    if r["text"]
+                ]
+                
+                news_text = await self._imitation_service._generate_news(messages)
+                if not news_text:
+                    continue
+                
+                # Import the markdown converter
+                from .imitation_service import _markdown_to_html
+                
+                header = "📰 Утренние новости чата:\n\n"
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=_markdown_to_html(header + news_text),
+                    parse_mode=ParseMode.HTML,
+                )
+                LOGGER.info("Sent scheduled news to chat %d", chat_id)
+                
+            except Exception:
+                LOGGER.exception("Failed to send scheduled news to chat %d", chat_id)
 
     # --- handlers ------------------------------------------------------------------
     async def on_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

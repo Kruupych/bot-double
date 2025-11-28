@@ -49,6 +49,11 @@ class Settings:
     persona_analysis_min_messages: int = 50
     persona_analysis_max_messages: int = 100
     persona_analysis_min_hours: int = 24
+    scheduled_news_enabled: bool = False
+    scheduled_news_hour: int = 9
+    scheduled_news_minute: int = 0
+    scheduled_news_min_messages: int = 100
+    scheduled_news_timezone: str = "Europe/Moscow"
 
 
 class SettingsError(RuntimeError):
@@ -191,6 +196,16 @@ def load_settings() -> Settings:
     if persona_model is None:
         persona_model = openai_model
 
+    scheduled_news_enabled = _get_env_bool("SCHEDULED_NEWS_ENABLED", False)
+    scheduled_news_hour = _get_env_int("SCHEDULED_NEWS_HOUR", 9, minimum=0)
+    if scheduled_news_hour > 23:
+        raise SettingsError("SCHEDULED_NEWS_HOUR must be 0-23")
+    scheduled_news_minute = _get_env_int("SCHEDULED_NEWS_MINUTE", 0, minimum=0)
+    if scheduled_news_minute > 59:
+        raise SettingsError("SCHEDULED_NEWS_MINUTE must be 0-59")
+    scheduled_news_min_messages = _get_env_int("SCHEDULED_NEWS_MIN_MESSAGES", 100, minimum=1)
+    scheduled_news_timezone = os.getenv("SCHEDULED_NEWS_TIMEZONE", "Europe/Moscow")
+
     return Settings(
         bot_token=bot_token,
         openai_api_key=openai_api_key,
@@ -229,4 +244,9 @@ def load_settings() -> Settings:
         persona_analysis_min_messages=persona_min_msgs,
         persona_analysis_max_messages=persona_max_msgs,
         persona_analysis_min_hours=persona_min_hours,
+        scheduled_news_enabled=scheduled_news_enabled,
+        scheduled_news_hour=scheduled_news_hour,
+        scheduled_news_minute=scheduled_news_minute,
+        scheduled_news_min_messages=scheduled_news_min_messages,
+        scheduled_news_timezone=scheduled_news_timezone,
     )
