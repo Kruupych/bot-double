@@ -29,6 +29,8 @@ from .prompts import (
     STORY_LONG_INSTRUCTIONS,
     STORY_SHORT_INSTRUCTIONS,
     STORY_SYSTEM,
+    SUMMARY_INSTRUCTIONS,
+    SUMMARY_SYSTEM,
 )
 
 
@@ -626,6 +628,64 @@ class StyleEngine:
                 {
                     "role": "system",
                     "content": NEWS_SYSTEM,
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            **kwargs,
+        )
+        return response.output_text.strip()
+
+    def generate_summary(
+        self,
+        chat_title: Optional[str],
+        messages: List[dict],
+    ) -> str:
+        """
+        Generate a factual summary of recent chat events.
+        
+        Args:
+            chat_title: Name of the chat (if available)
+            messages: List of recent messages with 'author' and 'text' keys
+        """
+        if not messages:
+            raise ValueError("No messages supplied for summary generation")
+
+        chat_name = chat_title or "чат"
+        
+        # Format messages for the prompt
+        message_lines: List[str] = []
+        for msg in messages:
+            author = msg.get("author", "Аноним")
+            text = msg.get("text", "")
+            if text:
+                message_lines.append(f"{author}: {text}")
+        
+        if not message_lines:
+            raise ValueError("No valid messages for summary generation")
+        
+        messages_block = "\n".join(message_lines[-50:])  # Last 50 messages max
+        
+        prompt = (
+            f"Составь резюме для чата «{chat_name}».\n\n"
+            f"Последние сообщения:\n{messages_block}\n\n"
+            f"{SUMMARY_INSTRUCTIONS}"
+        )
+
+        kwargs: dict[str, object] = {}
+        if self._reasoning_effort:
+            kwargs["reasoning"] = {"effort": self._reasoning_effort}
+        if self._text_verbosity:
+            kwargs["text"] = {"verbosity": self._text_verbosity}
+
+        response = self._client.responses.create(
+            model=self._model,
+            input=[
+                {
+                    "role": "system",
+                    "content": SUMMARY_SYSTEM,
                 },
                 {
                     "role": "user",

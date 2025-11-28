@@ -763,6 +763,57 @@ class ImitationService:
             lambda: self._style.generate_news(chat_title, messages),
         )
 
+    async def summary_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Generate a factual summary of recent chat events."""
+        message = update.effective_message
+        chat = update.effective_chat
+        if not message or not chat:
+            return
+
+        # Get recent messages from the chat
+        rows = await self._run_db(self._db.get_recent_chat_messages, chat.id, 100)
+        
+        if not rows or len(rows) < 5:
+            await message.reply_text(
+                "Недостаточно сообщений для резюме. Нужно хотя бы 5 сообщений."
+            )
+            return
+
+        # Format messages for the summary generator
+        messages: List[dict] = []
+        for row in rows:
+            author = display_name(row["username"], row["first_name"], row["last_name"])
+            text = row["text"]
+            if text:
+                messages.append({"author": author, "text": text})
+
+        if len(messages) < 5:
+            await message.reply_text("Недостаточно текстовых сообщений для резюме.")
+            return
+
+        chat_title = chat.title if hasattr(chat, 'title') else None
+
+        try:
+            summary_text = await self._generate_summary(chat_title, messages)
+        except Exception:
+            await message.reply_text(
+                "Не удалось сгенерировать резюме. Попробуйте позже."
+            )
+            return
+
+        await message.reply_text(summary_text)
+
+    async def _generate_summary(
+        self,
+        chat_title: Optional[str],
+        messages: List[dict],
+    ) -> str:
+        """Call StyleEngine to generate chat summary."""
+        return await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: self._style.generate_summary(chat_title, messages),
+        )
+
     async def story_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Generate a short story with chat participants as characters."""
         await self._handle_story_command(update, context, long_version=False)
