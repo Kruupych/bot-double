@@ -298,7 +298,7 @@ class StyleEngine:
             persona_section = f"\nКарточка персоны:\n{persona_card}\n"
 
         prompt = (
-            f"Сделай добродушную «поджарку» пользователя {display_name}{aliases_hint} (@{username}).\n\n"
+            f"Сделай жёсткую прожарку пользователя {display_name}{aliases_hint} (@{username}).\n\n"
             f"Примеры его сообщений:\n{sample_block}\n"
             f"{summary_section}"
             f"{persona_section}\n"
