@@ -20,6 +20,8 @@ from .prompts import (
     HOROSCOPE_SYSTEM,
     IMITATION_RULES,
     IMITATION_SYSTEM,
+    NEWS_INSTRUCTIONS,
+    NEWS_SYSTEM,
     REQUESTER_OTHER_INSTRUCTION,
     REQUESTER_SELF_INSTRUCTION,
     ROAST_INSTRUCTIONS,
@@ -566,6 +568,64 @@ class StyleEngine:
                 {
                     "role": "system",
                     "content": BATTLE_SYSTEM,
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            **kwargs,
+        )
+        return response.output_text.strip()
+
+    def generate_news(
+        self,
+        chat_title: Optional[str],
+        messages: List[dict],
+    ) -> str:
+        """
+        Generate a tabloid-style news article about recent chat events.
+        
+        Args:
+            chat_title: Name of the chat (if available)
+            messages: List of recent messages with 'author' and 'text' keys
+        """
+        if not messages:
+            raise ValueError("No messages supplied for news generation")
+
+        chat_name = chat_title or "Секретный чат"
+        
+        # Format messages for the prompt
+        message_lines: List[str] = []
+        for msg in messages:
+            author = msg.get("author", "Аноним")
+            text = msg.get("text", "")
+            if text:
+                message_lines.append(f"{author}: {text}")
+        
+        if not message_lines:
+            raise ValueError("No valid messages for news generation")
+        
+        messages_block = "\n".join(message_lines[-50:])  # Last 50 messages max
+        
+        prompt = (
+            f"Напиши выпуск новостей для чата «{chat_name}».\n\n"
+            f"Последние сообщения в чате:\n{messages_block}\n\n"
+            f"{NEWS_INSTRUCTIONS}"
+        )
+
+        kwargs: dict[str, object] = {}
+        if self._reasoning_effort:
+            kwargs["reasoning"] = {"effort": self._reasoning_effort}
+        if self._text_verbosity:
+            kwargs["text"] = {"verbosity": self._text_verbosity}
+
+        response = self._client.responses.create(
+            model=self._model,
+            input=[
+                {
+                    "role": "system",
+                    "content": NEWS_SYSTEM,
                 },
                 {
                     "role": "user",

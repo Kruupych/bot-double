@@ -711,6 +711,58 @@ class ImitationService:
             ),
         )
 
+    async def news_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Generate a tabloid-style news article about recent chat events."""
+        message = update.effective_message
+        chat = update.effective_chat
+        if not message or not chat:
+            return
+
+        # Get recent messages from the chat
+        rows = await self._run_db(self._db.get_recent_chat_messages, chat.id, 100)
+        
+        if not rows or len(rows) < 10:
+            await message.reply_text(
+                "Недостаточно сообщений в чате для выпуска новостей. "
+                "Нужно хотя бы 10 сообщений."
+            )
+            return
+
+        # Format messages for the news generator
+        messages: List[dict] = []
+        for row in rows:
+            author = display_name(row["username"], row["first_name"], row["last_name"])
+            text = row["text"]
+            if text:
+                messages.append({"author": author, "text": text})
+
+        if len(messages) < 10:
+            await message.reply_text("Недостаточно текстовых сообщений для новостей.")
+            return
+
+        chat_title = chat.title if hasattr(chat, 'title') else None
+
+        try:
+            news_text = await self._generate_news(chat_title, messages)
+        except Exception:
+            await message.reply_text(
+                "Не удалось сгенерировать новости. Попробуйте позже."
+            )
+            return
+
+        await message.reply_text(news_text)
+
+    async def _generate_news(
+        self,
+        chat_title: Optional[str],
+        messages: List[dict],
+    ) -> str:
+        """Call StyleEngine to generate chat news."""
+        return await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: self._style.generate_news(chat_title, messages),
+        )
+
     async def story_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Generate a short story with chat participants as characters."""
         await self._handle_story_command(update, context, long_version=False)
