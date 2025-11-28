@@ -50,6 +50,7 @@ class RequesterProfile:
     name: str
     samples: List[str]
     is_same_person: bool
+    aliases: Optional[List[str]] = None
 
 
 @dataclass(slots=True)
@@ -144,11 +145,15 @@ class StyleEngine:
 
         requester_section = ""
         if requester:
+            # Build requester aliases hint (only if not same person)
+            requester_aliases_hint = ""
+            if requester.aliases and not requester.is_same_person:
+                requester_aliases_hint = f" (также известен как: {', '.join(requester.aliases)})"
             sample_hint = ""
             if requester.samples:
                 joined = " / ".join(requester.samples)
                 sample_hint = f" Он обычно пишет так: {joined}."
-            requester_section = f"Вопрос задаёт {requester.name}.{sample_hint}\n"
+            requester_section = f"Вопрос задаёт {requester.name}{requester_aliases_hint}.{sample_hint}\n"
             if requester.is_same_person:
                 _log.info("Adding SELF instruction for user %s", requester.name)
                 requester_section += REQUESTER_SELF_INSTRUCTION

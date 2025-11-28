@@ -937,10 +937,17 @@ class BotDouble:
             )
         if not formatted and not is_same_person:
             return None
+        # Fetch requester aliases (only if not same person)
+        requester_aliases: Optional[List[str]] = None
+        if not is_same_person:
+            requester_aliases = await self._run_db(
+                self._db.get_user_aliases, chat_id, requester_internal_id, 5
+            ) or None
         return RequesterProfile(
             name=name,
             samples=formatted[:sample_limit],
             is_same_person=is_same_person,
+            aliases=requester_aliases,
         )
 
     async def _run_db(self, func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
