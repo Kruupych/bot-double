@@ -99,10 +99,16 @@ class StyleEngine:
         style_summary: Optional[str] = None,
         persona_card: Optional[str] = None,
         relationship_hint: Optional[str] = None,
+        persona_aliases: Optional[List[str]] = None,
     ) -> str:
         sample_block = "\n".join(f"- {sample.text}" for sample in samples)
         if not sample_block:
             raise ValueError("No samples supplied for style generation")
+
+        # Build aliases hint for persona
+        aliases_hint = ""
+        if persona_aliases:
+            aliases_hint = f" (также известен как: {', '.join(persona_aliases)})"
 
         summary_section = ""
         if style_summary:
@@ -153,7 +159,7 @@ class StyleEngine:
         rules_section = IMITATION_RULES + "\n\n"
 
         prompt = (
-            f"Собери ответ в стиле пользователя {display_name}"
+            f"Собери ответ в стиле пользователя {display_name}{aliases_hint}"
             f" (username: @{username}).\n\n"
             f"Примеры сообщений (без имен):\n{sample_block}\n\n"
             f"{summary_section}"

@@ -330,6 +330,20 @@ class Database:
         )
         return cursor.fetchall()
 
+    def get_user_aliases(self, chat_id: int, user_id: int, limit: int = 5) -> List[str]:
+        """Get aliases for a specific user in a chat."""
+        cursor = self._conn.execute(
+            """
+            SELECT alias
+            FROM user_aliases
+            WHERE chat_id = ? AND user_id = ?
+            ORDER BY RANDOM()
+            LIMIT ?
+            """,
+            (chat_id, user_id, limit),
+        )
+        return [row["alias"] for row in cursor.fetchall()]
+
     def get_user_by_telegram_id(self, telegram_id: int) -> Optional[sqlite3.Row]:
         cursor = self._conn.execute(
             "SELECT id, telegram_id, username, first_name, last_name FROM users WHERE telegram_id = ?",

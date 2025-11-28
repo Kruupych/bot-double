@@ -809,6 +809,10 @@ class ImitationService:
             addressee_internal_id,
             addressee_name,
         )
+        # Fetch random aliases for persona (up to 5)
+        persona_aliases = await self._run_db(
+            self._db.get_user_aliases, chat.id, user_id, 5
+        )
         starter = self._imitation.format_chain_prompt(chain)
         try:
             reply_text = await self._generate_reply(
@@ -823,6 +827,7 @@ class ImitationService:
                 style_summary,
                 persona_card,
                 relationship_hint,
+                persona_aliases or None,
             )
         except Exception:
             await message.reply_text(
@@ -863,23 +868,26 @@ class ImitationService:
         style_summary: Optional[str],
         persona_card: Optional[str],
         relationship_hint: Optional[str],
+        persona_aliases: Optional[List[str]] = None,
     ) -> str:
         loop = asyncio.get_running_loop()
         style_samples = [StyleSample(text=sample) for sample in samples]
         return await loop.run_in_executor(
             None,
-            self._style.generate_reply,
-            username,
-            persona_name,
-            style_samples,
-            starter,
-            context_messages,
-            peer_profiles,
-            requester_profile,
-            persona_gender,
-            style_summary,
-            persona_card,
-            relationship_hint,
+            lambda: self._style.generate_reply(
+                username,
+                persona_name,
+                style_samples,
+                starter,
+                context_messages,
+                peer_profiles,
+                requester_profile,
+                persona_gender,
+                style_summary,
+                persona_card,
+                relationship_hint,
+                persona_aliases,
+            ),
         )
 
     async def _generate_dialogue(
