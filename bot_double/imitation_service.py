@@ -212,6 +212,10 @@ class ImitationService:
             persona_name_a,
         )
 
+        # Fetch aliases for both participants
+        aliases_a = await self._run_db(self._db.get_user_aliases, chat.id, internal_a, 5) or None
+        aliases_b = await self._run_db(self._db.get_user_aliases, chat.id, internal_b, 5) or None
+
         try:
             dialogue_text = await self._generate_dialogue(
                 username_a,
@@ -220,12 +224,14 @@ class ImitationService:
                 style_summary_a,
                 persona_card_a,
                 relationship_hint_a,
+                aliases_a,
                 username_b,
                 persona_name_b,
                 samples_b,
                 style_summary_b,
                 persona_card_b,
                 relationship_hint_b,
+                aliases_b,
                 topic or "",
             )
         except Exception:
@@ -282,6 +288,9 @@ class ImitationService:
             chat.id, user_id, samples
         )
 
+        # Fetch aliases for persona
+        aliases = await self._run_db(self._db.get_user_aliases, chat.id, user_id, 5) or None
+
         try:
             roast_text = await self._generate_roast(
                 user_row["username"] or username,
@@ -289,6 +298,7 @@ class ImitationService:
                 samples,
                 style_summary,
                 persona_card,
+                aliases,
             )
         except Exception:
             await message.reply_text(
@@ -306,6 +316,7 @@ class ImitationService:
         samples: List[str],
         style_summary: Optional[str],
         persona_card: Optional[str],
+        aliases: Optional[List[str]] = None,
     ) -> str:
         """Call StyleEngine to generate a roast."""
         from .style_engine import StyleSample
@@ -319,6 +330,7 @@ class ImitationService:
                 style_samples,
                 style_summary,
                 persona_card,
+                aliases,
             ),
         )
 
@@ -371,6 +383,9 @@ class ImitationService:
             chat.id, user_id, samples
         )
 
+        # Fetch aliases for persona
+        aliases = await self._run_db(self._db.get_user_aliases, chat.id, user_id, 5) or None
+
         try:
             horoscope_text = await self._generate_horoscope(
                 user_row["username"] or username,
@@ -378,6 +393,7 @@ class ImitationService:
                 samples,
                 style_summary,
                 persona_card,
+                aliases,
             )
         except Exception:
             await message.reply_text(
@@ -395,6 +411,7 @@ class ImitationService:
         samples: List[str],
         style_summary: Optional[str],
         persona_card: Optional[str],
+        aliases: Optional[List[str]] = None,
     ) -> str:
         """Call StyleEngine to generate a horoscope."""
         from .style_engine import StyleSample
@@ -408,6 +425,7 @@ class ImitationService:
                 style_samples,
                 style_summary,
                 persona_card,
+                aliases,
             ),
         )
 
@@ -491,16 +509,22 @@ class ImitationService:
             chat.id, internal_b, samples_b
         )
 
+        # Fetch aliases for both users
+        aliases_a = await self._run_db(self._db.get_user_aliases, chat.id, internal_a, 5) or None
+        aliases_b = await self._run_db(self._db.get_user_aliases, chat.id, internal_b, 5) or None
+
         try:
             result = await self._generate_compatibility(
                 persona_name_a,
                 row_a["username"] or username_a,
                 samples_a,
                 style_summary_a,
+                aliases_a,
                 persona_name_b,
                 row_b["username"] or username_b,
                 samples_b,
                 style_summary_b,
+                aliases_b,
             )
         except Exception:
             await message.reply_text(
@@ -517,10 +541,12 @@ class ImitationService:
         username_a: str,
         samples_a: List[str],
         style_summary_a: Optional[str],
+        aliases_a: Optional[List[str]],
         name_b: str,
         username_b: str,
         samples_b: List[str],
         style_summary_b: Optional[str],
+        aliases_b: Optional[List[str]],
     ) -> str:
         """Call StyleEngine to generate compatibility analysis."""
         from .style_engine import StyleSample
@@ -535,10 +561,12 @@ class ImitationService:
                 username_a,
                 style_samples_a,
                 style_summary_a,
+                aliases_a,
                 name_b,
                 username_b,
                 style_samples_b,
                 style_summary_b,
+                aliases_b,
             ),
         )
 
@@ -627,11 +655,15 @@ class ImitationService:
                 chat.id, internal_id, samples
             )
 
+            # Fetch aliases for character
+            aliases = await self._run_db(self._db.get_user_aliases, chat.id, internal_id, 5) or None
+
             characters.append(StoryCharacter(
                 name=persona_name,
                 username=row["username"] or f"user{internal_id}",
                 samples=[StyleSample(text=s) for s in samples],
                 style_summary=style_summary,
+                aliases=aliases,
             ))
 
         # Generate the story
@@ -898,12 +930,14 @@ class ImitationService:
         style_summary_a: Optional[str],
         persona_card_a: Optional[str],
         relationship_hint_a: Optional[str],
+        aliases_a: Optional[List[str]],
         username_b: str,
         persona_name_b: str,
         samples_b: List[str],
         style_summary_b: Optional[str],
         persona_card_b: Optional[str],
         relationship_hint_b: Optional[str],
+        aliases_b: Optional[List[str]],
         topic: str,
     ) -> str:
         loop = asyncio.get_running_loop()
@@ -914,6 +948,7 @@ class ImitationService:
             style_summary=style_summary_a,
             persona_card=persona_card_a,
             relationship_hint=relationship_hint_a,
+            aliases=aliases_a,
         )
         participant_b = DialogueParticipant(
             username=username_b,
@@ -922,6 +957,7 @@ class ImitationService:
             style_summary=style_summary_b,
             persona_card=persona_card_b,
             relationship_hint=relationship_hint_b,
+            aliases=aliases_b,
         )
         return await loop.run_in_executor(
             None,

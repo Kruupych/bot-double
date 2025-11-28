@@ -61,6 +61,7 @@ class DialogueParticipant:
     style_summary: Optional[str]
     persona_card: Optional[str]
     relationship_hint: Optional[str]
+    aliases: Optional[List[str]] = None
 
 
 @dataclass(slots=True)
@@ -70,6 +71,7 @@ class StoryCharacter:
     username: str
     samples: List[StyleSample]
     style_summary: Optional[str] = None
+    aliases: Optional[List[str]] = None
 
 
 class StyleEngine:
@@ -234,9 +236,12 @@ class StyleEngine:
                 parts.append(f"Особенности общения: {relationship}")
             return "\n".join(parts)
 
+        def _aliases_hint(aliases: Optional[List[str]]) -> str:
+            return f" (также известен как: {', '.join(aliases)})" if aliases else ""
+
         participant_sections = (
-            f"{participant_a.name} (@{participant_a.username}):\n{_participant_section(participant_a)}\n\n"
-            f"{participant_b.name} (@{participant_b.username}):\n{_participant_section(participant_b)}"
+            f"{participant_a.name}{_aliases_hint(participant_a.aliases)} (@{participant_a.username}):\n{_participant_section(participant_a)}\n\n"
+            f"{participant_b.name}{_aliases_hint(participant_b.aliases)} (@{participant_b.username}):\n{_participant_section(participant_b)}"
         )
 
         dialogue_rules = DIALOGUE_RULES_TEMPLATE.format(
@@ -273,11 +278,16 @@ class StyleEngine:
         samples: Iterable[StyleSample],
         style_summary: Optional[str] = None,
         persona_card: Optional[str] = None,
+        aliases: Optional[List[str]] = None,
     ) -> str:
         """Generate a playful roast based on user's communication style."""
         sample_block = "\n".join(f"- {sample.text}" for sample in samples)
         if not sample_block:
             raise ValueError("No samples supplied for roast generation")
+
+        aliases_hint = ""
+        if aliases:
+            aliases_hint = f" (также известен как: {', '.join(aliases)})"
 
         summary_section = ""
         if style_summary:
@@ -288,7 +298,7 @@ class StyleEngine:
             persona_section = f"\nКарточка персоны:\n{persona_card}\n"
 
         prompt = (
-            f"Сделай добродушную «поджарку» пользователя {display_name} (@{username}).\n\n"
+            f"Сделай добродушную «поджарку» пользователя {display_name}{aliases_hint} (@{username}).\n\n"
             f"Примеры его сообщений:\n{sample_block}\n"
             f"{summary_section}"
             f"{persona_section}\n"
@@ -323,10 +333,12 @@ class StyleEngine:
         username_a: str,
         samples_a: Iterable[StyleSample],
         style_summary_a: Optional[str],
+        aliases_a: Optional[List[str]],
         name_b: str,
         username_b: str,
         samples_b: Iterable[StyleSample],
         style_summary_b: Optional[str],
+        aliases_b: Optional[List[str]],
     ) -> str:
         """Generate a fun compatibility analysis between two users."""
         sample_block_a = "\n".join(f"- {s.text}" for s in samples_a)
@@ -335,6 +347,9 @@ class StyleEngine:
         if not sample_block_a or not sample_block_b:
             raise ValueError("Both users must have samples for compatibility check")
 
+        aliases_hint_a = f" (также известен как: {', '.join(aliases_a)})" if aliases_a else ""
+        aliases_hint_b = f" (также известен как: {', '.join(aliases_b)})" if aliases_b else ""
+
         summary_a = f"\nСтиль: {style_summary_a}" if style_summary_a else ""
         summary_b = f"\nСтиль: {style_summary_b}" if style_summary_b else ""
 
@@ -342,9 +357,9 @@ class StyleEngine:
 
         prompt = (
             f"Составь шуточный тест совместимости для {name_a} и {name_b}.\n\n"
-            f"👤 {name_a} (@{username_a}):\n"
+            f"👤 {name_a}{aliases_hint_a} (@{username_a}):\n"
             f"Примеры сообщений:\n{sample_block_a}{summary_a}\n\n"
-            f"👤 {name_b} (@{username_b}):\n"
+            f"👤 {name_b}{aliases_hint_b} (@{username_b}):\n"
             f"Примеры сообщений:\n{sample_block_b}{summary_b}\n\n"
             f"{instructions}"
         )
@@ -397,7 +412,8 @@ class StyleEngine:
             sample_block = "\n".join(f"- {s.text}" for s in char.samples)
             if not sample_block:
                 continue
-            section = f"👤 {char.name} (@{char.username}):\n"
+            aliases_hint = f" (также известен как: {', '.join(char.aliases)})" if char.aliases else ""
+            section = f"👤 {char.name}{aliases_hint} (@{char.username}):\n"
             section += f"Примеры речи:\n{sample_block}"
             if char.style_summary:
                 section += f"\nХарактеристика стиля: {char.style_summary}"
@@ -450,11 +466,16 @@ class StyleEngine:
         samples: Iterable[StyleSample],
         style_summary: Optional[str] = None,
         persona_card: Optional[str] = None,
+        aliases: Optional[List[str]] = None,
     ) -> str:
         """Generate a personalized horoscope based on user's communication patterns."""
         sample_block = "\n".join(f"- {sample.text}" for sample in samples)
         if not sample_block:
             raise ValueError("No samples supplied for horoscope generation")
+
+        aliases_hint = ""
+        if aliases:
+            aliases_hint = f" (также известен как: {', '.join(aliases)})"
 
         summary_section = ""
         if style_summary:
@@ -465,7 +486,7 @@ class StyleEngine:
             persona_section = f"\nКарточка персоны:\n{persona_card}\n"
 
         prompt = (
-            f"Составь персональный гороскоп для {display_name} (@{username}).\n\n"
+            f"Составь персональный гороскоп для {display_name}{aliases_hint} (@{username}).\n\n"
             f"Примеры его сообщений:\n{sample_block}\n"
             f"{summary_section}"
             f"{persona_section}\n"
