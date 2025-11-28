@@ -944,6 +944,69 @@ class ImitationService:
             lambda: self._style.generate_summary(chat_title, messages),
         )
 
+    async def conspiracy_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Generate a conspiracy theory about the chat."""
+        message = update.effective_message
+        chat = update.effective_chat
+        if not message or not chat:
+            return
+
+        # Get recent messages from the chat
+        rows = await self._run_db(self._db.get_recent_chat_messages, chat.id, 100)
+
+        if not rows or len(rows) < 10:
+            await message.reply_text(
+                "Недостаточно материала для расследования. "
+                "Нужно хотя бы 10 сообщений... или они уже всё зачистили? 🤔"
+            )
+            return
+
+        # Format messages for the conspiracy generator
+        messages: List[dict] = []
+        for row in rows:
+            name = display_name(row["username"], row["first_name"], row["last_name"])
+            text = row["text"]
+            if text:
+                messages.append({"name": name, "text": text})
+
+        if len(messages) < 10:
+            await message.reply_text(
+                "Слишком мало перехваченных данных. Они знают, что мы следим."
+            )
+            return
+
+        chat_title = chat.title if hasattr(chat, "title") else None
+
+        try:
+            conspiracy_text = await self._generate_conspiracy(chat_title, messages)
+        except Exception:
+            await message.reply_text(
+                "Связь потеряна... Они глушат сигнал. Попробуйте позже."
+            )
+            return
+
+        if not conspiracy_text:
+            await message.reply_text("Заговор слишком глубок. Данные засекречены.")
+            return
+
+        await message.reply_text(
+            _markdown_to_html(conspiracy_text),
+            parse_mode=ParseMode.HTML,
+        )
+
+    async def _generate_conspiracy(
+        self,
+        chat_title: Optional[str],
+        messages: List[dict],
+    ) -> str:
+        """Call StyleEngine to generate a conspiracy theory."""
+        return await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: self._style.generate_conspiracy(chat_title, messages),
+        )
+
     async def story_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Generate a short story with chat participants as characters."""
         await self._handle_story_command(update, context, long_version=False)

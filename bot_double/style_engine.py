@@ -13,6 +13,8 @@ from .prompts import (
     BATTLE_SYSTEM,
     COMPATIBILITY_INSTRUCTIONS,
     COMPATIBILITY_SYSTEM,
+    CONSPIRACY_INSTRUCTIONS,
+    CONSPIRACY_SYSTEM,
     DIALOGUE_RULES_TEMPLATE,
     GENDER_FEMALE_INSTRUCTION,
     GENDER_MALE_INSTRUCTION,
@@ -744,6 +746,64 @@ class StyleEngine:
                 {
                     "role": "system",
                     "content": TINDER_SYSTEM,
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            **kwargs,
+        )
+        return response.output_text.strip()
+
+    def generate_conspiracy(
+        self,
+        chat_title: Optional[str],
+        messages: List[dict],
+    ) -> str:
+        """
+        Generate a conspiracy theory about the chat.
+        
+        Args:
+            chat_title: Name of the chat (if available)
+            messages: List of recent messages with 'name' and 'text' keys
+        """
+        if not messages:
+            raise ValueError("No messages supplied for conspiracy generation")
+
+        chat_name = chat_title or "Секретный чат"
+        
+        # Format messages for the prompt
+        message_lines: List[str] = []
+        for msg in messages:
+            name = msg.get("name", "Аноним")
+            text = msg.get("text", "")
+            if text:
+                message_lines.append(f"{name}: {text}")
+        
+        if not message_lines:
+            raise ValueError("No valid messages for conspiracy generation")
+        
+        messages_block = "\n".join(message_lines[-50:])  # Last 50 messages max
+        
+        prompt = (
+            f"Проанализируй переписку чата «{chat_name}» и раскрой ЗАГОВОР.\n\n"
+            f"Перехваченные сообщения:\n{messages_block}\n\n"
+            f"{CONSPIRACY_INSTRUCTIONS}"
+        )
+
+        kwargs: dict[str, object] = {}
+        if self._reasoning_effort:
+            kwargs["reasoning"] = {"effort": self._reasoning_effort}
+        if self._text_verbosity:
+            kwargs["text"] = {"verbosity": self._text_verbosity}
+
+        response = self._client.responses.create(
+            model=self._model,
+            input=[
+                {
+                    "role": "system",
+                    "content": CONSPIRACY_SYSTEM,
                 },
                 {
                     "role": "user",

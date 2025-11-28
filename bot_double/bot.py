@@ -1110,6 +1110,7 @@ def run_bot(settings: Settings) -> None:
     application.add_handler(CommandHandler("battle", bot.imitation.battle_command))
     application.add_handler(CommandHandler("news", bot.imitation.news_command))
     application.add_handler(CommandHandler("summary", bot.imitation.summary_command))
+    application.add_handler(CommandHandler("conspiracy", bot.imitation.conspiracy_command))
     application.add_handler(CommandHandler("story", bot.imitation.story_command))
     application.add_handler(CommandHandler("long_story", bot.imitation.long_story_command))
     application.add_handler(CommandHandler("profile", bot.commands.profile_command))
