@@ -843,7 +843,8 @@ class ImitationService:
             return
 
         # Get recent messages from the chat
-        rows = await self._run_db(self._db.get_recent_chat_messages, chat.id, 100)
+        limit = self._settings.chat_history_limit
+        rows = await self._run_db(self._db.get_recent_chat_messages, chat.id, limit)
         
         if not rows or len(rows) < 10:
             await message.reply_text(
@@ -898,7 +899,8 @@ class ImitationService:
             return
 
         # Get recent messages from the chat
-        rows = await self._run_db(self._db.get_recent_chat_messages, chat.id, 100)
+        limit = self._settings.chat_history_limit
+        rows = await self._run_db(self._db.get_recent_chat_messages, chat.id, limit)
         
         if not rows or len(rows) < 5:
             await message.reply_text(
@@ -954,7 +956,8 @@ class ImitationService:
             return
 
         # Get recent messages from the chat
-        rows = await self._run_db(self._db.get_recent_chat_messages, chat.id, 100)
+        limit = self._settings.chat_history_limit
+        rows = await self._run_db(self._db.get_recent_chat_messages, chat.id, limit)
 
         if not rows or len(rows) < 10:
             await message.reply_text(

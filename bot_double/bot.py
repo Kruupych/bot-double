@@ -254,8 +254,9 @@ class BotDouble:
                 )
                 
                 # Get recent messages for news generation
+                limit = self._settings.chat_history_limit
                 rows = await self._run_db(
-                    self._db.get_recent_chat_messages, chat_id, 100
+                    self._db.get_recent_chat_messages, chat_id, limit
                 )
                 if len(rows) < 20:
                     continue

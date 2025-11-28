@@ -66,6 +66,7 @@ Telegram-бот, который автоматически собирает со
    | `SCHEDULED_NEWS_MINUTE` | минута запуска (0-59) | `0` |
    | `SCHEDULED_NEWS_MIN_MESSAGES` | минимум сообщений за 24ч для отправки | `100` |
    | `SCHEDULED_NEWS_TIMEZONE` | часовой пояс для расписания | `Europe/Moscow` |
+   | `CHAT_HISTORY_LIMIT` | сколько сообщений брать для /news, /summary, /conspiracy | `100` |
 
 2. Установите зависимости:
    ```bash

@@ -54,6 +54,7 @@ class Settings:
     scheduled_news_minute: int = 0
     scheduled_news_min_messages: int = 100
     scheduled_news_timezone: str = "Europe/Moscow"
+    chat_history_limit: int = 100
 
 
 class SettingsError(RuntimeError):
@@ -205,6 +206,7 @@ def load_settings() -> Settings:
         raise SettingsError("SCHEDULED_NEWS_MINUTE must be 0-59")
     scheduled_news_min_messages = _get_env_int("SCHEDULED_NEWS_MIN_MESSAGES", 100, minimum=1)
     scheduled_news_timezone = os.getenv("SCHEDULED_NEWS_TIMEZONE", "Europe/Moscow")
+    chat_history_limit = _get_env_int("CHAT_HISTORY_LIMIT", 100, minimum=10)
 
     return Settings(
         bot_token=bot_token,
@@ -249,4 +251,5 @@ def load_settings() -> Settings:
         scheduled_news_minute=scheduled_news_minute,
         scheduled_news_min_messages=scheduled_news_min_messages,
         scheduled_news_timezone=scheduled_news_timezone,
+        chat_history_limit=chat_history_limit,
     )

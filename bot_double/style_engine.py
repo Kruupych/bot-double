@@ -612,7 +612,7 @@ class StyleEngine:
         if not message_lines:
             raise ValueError("No valid messages for news generation")
         
-        messages_block = "\n".join(message_lines[-50:])  # Last 50 messages max
+        messages_block = "\n".join(message_lines)
         
         prompt = (
             f"Напиши выпуск новостей для чата «{chat_name}».\n\n"
@@ -670,7 +670,7 @@ class StyleEngine:
         if not message_lines:
             raise ValueError("No valid messages for summary generation")
         
-        messages_block = "\n".join(message_lines[-50:])  # Last 50 messages max
+        messages_block = "\n".join(message_lines)
         
         prompt = (
             f"Составь резюме для чата «{chat_name}».\n\n"
@@ -784,8 +784,8 @@ class StyleEngine:
         if not message_lines:
             raise ValueError("No valid messages for conspiracy generation")
         
-        messages_block = "\n".join(message_lines[-50:])  # Last 50 messages max
-        
+        messages_block = "\n".join(message_lines)
+
         prompt = (
             f"Проанализируй переписку чата «{chat_name}» и раскрой ЗАГОВОР.\n\n"
             f"Перехваченные сообщения:\n{messages_block}\n\n"
