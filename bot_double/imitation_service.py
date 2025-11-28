@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import re
 import sqlite3
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple, TypeVar
-
-import re
 
 from telegram import Message, MessageEntity, Update, User
 from telegram.constants import ParseMode
@@ -26,6 +25,8 @@ from .style_engine import (
     StyleSample,
 )
 from .utils import display_name, guess_gender, send_long_text
+
+LOGGER = logging.getLogger(__name__)
 
 T = TypeVar("T")
 RunDB = Callable[..., Awaitable[T]]
@@ -984,7 +985,8 @@ class ImitationService:
 
         try:
             conspiracy_text = await self._generate_conspiracy(chat_title, messages)
-        except Exception:
+        except Exception as exc:
+            LOGGER.exception("Failed to generate conspiracy: %s", exc)
             await message.reply_text(
                 "Связь потеряна... Они глушат сигнал. Попробуйте позже."
             )
