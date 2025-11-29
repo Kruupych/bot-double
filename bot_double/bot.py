@@ -1014,7 +1014,7 @@ class BotDouble:
         name = display_name(user.username, user.first_name, user.last_name)
         is_same_person = requester_internal_id == target_internal_id
         if is_same_person:
-            _log.info(
+            LOGGER.info(
                 "Self-imitation detected: requester_id=%d, target_id=%d, user=%s",
                 requester_internal_id, target_internal_id, name,
             )
